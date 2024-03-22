@@ -1,0 +1,1 @@
+geometry_msgs/PoseStamped local_pose
