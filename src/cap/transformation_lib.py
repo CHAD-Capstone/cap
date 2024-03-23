@@ -41,12 +41,13 @@ def matrix_to_transform_stamped(matrix, frame_id, child_frame_id):
     transform_stamped.transform.rotation.x, transform_stamped.transform.rotation.y, transform_stamped.transform.rotation.z, transform_stamped.transform.rotation.w = quat
     return transform_stamped
 
-def matrix_to_pose_stamped(matrix, frame_id):
+def matrix_to_pose_stamped(matrix, header=None):
     """
     Convert a homogeneous transformation matrix to a PoseStamped object.
     """
     pose_stamped = PoseStamped()
-    pose_stamped.header.frame_id = frame_id
+    if header is not None:
+        pose_stamped.header = header
     pose_stamped.pose.position.x, pose_stamped.pose.position.y, pose_stamped.pose.position.z = matrix[:3, 3]
     quat = Rotation.from_matrix(matrix[:3, :3]).as_quat()
     pose_stamped.pose.orientation.x, pose_stamped.pose.orientation.y, pose_stamped.pose.orientation.z, pose_stamped.pose.orientation.w = quat

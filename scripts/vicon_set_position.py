@@ -78,7 +78,7 @@ class ViconPositionSetNode:
         self.vicon_sub = rospy.Subscriber('/vicon/ROB498_Drone/ROB498_Drone', TransformStamped, callback=self.vicon_cb)
         self.local_position_sub = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, callback=self.local_position_cb)
 
-        self.capdrone_set_position_local_sub = rospy.Subscriber('/capstone/setpoint_position/local', PoseStamped, callback=self.set_position_local_cb)
+        self.capdrone_set_position_local_sub = rospy.Subscriber('/capdrone/setpoint_position/local', PoseStamped, callback=self.set_position_local_cb)
         self.local_position_pub = rospy.Publisher('/mavros/setpoint_position/local', PoseStamped, queue_size=10)
 
         # self.tfBuffer = tf2_ros.Buffer()
