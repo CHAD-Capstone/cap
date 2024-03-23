@@ -1,7 +1,4 @@
-#!/usr/bin/python
-# In order to use the tf2 library we need to use python 2. It sucks. There is a way to recompile for python3 but it's not worth it right now
-# since this is just a simple node
-# https://answers.ros.org/question/326226/importerror-dynamic-module-does-not-define-module-export-function-pyinit__tf2/
+#!/usr/bin/python3
 
 """
 A node that allows for setting positions in the VICON frame even when the local position estimate is coming from realsense
@@ -59,8 +56,6 @@ pose:
 import rospy
 import numpy as np
 from geometry_msgs.msg import PoseStamped, TransformStamped
-# import tf2_ros
-import tf.transformations as tr
 
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Pose
@@ -70,7 +65,7 @@ from geometry_msgs.msg import Transform
 from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Vector3
 
-from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params
 
 class ViconPositionSetNode:
     def __init__(self, group_number, use_vicon):
@@ -142,21 +137,21 @@ class ViconPositionSetNode:
         #T_V_D[0, 3] = 1
         T_D_V = np.linalg.inv(T_V_D)
         # Get the xyz euler angles from the transform
-        print("VICON euler angles (VICON to Drone)", tr.euler_from_matrix(T_D_V))
+        print("VICON euler angles (VICON to Drone)", matrix_to_params(T_D_V, type="euler")[3:])
         print("Vicon Transform Stamped", self.current_vicon_transform.transform)
         print("VICON World to Drone SE3", T_D_V)
         # Get the transform from the realsense drone frame to the realsense world frame
         T_R_D = pose_stamped_to_matrix(self.current_local_position)
         # Sanity check, set T_R_D to identity
         #T_R_D = np.eye(4)
-        print("Realsense euler angles (Drone to Realsense)", tr.euler_from_matrix(T_R_D))
+        print("Realsense euler angles (Drone to Realsense)", matrix_to_params(T_R_D, type="euler")[3:])
         print("Realsense Local Position", self.current_local_position.pose)
         print("Drone to Realsense World SE3", T_R_D)
         # We can then get the transform from the vicon world frame to the realsense world frame
         # T_R_V = T_R @ np.linalg.inv(T_V)
         # Not allowed in python2
         T_R_V = np.dot(T_R_D, T_D_V)
-        print("VICON to realsense euler angles", tr.euler_from_matrix(T_R_V))
+        print("VICON to realsense euler angles", matrix_to_params(T_R_V, type="euler")[3:])
         print("VICON to Realsense Transform SE3", T_R_V)
 
         # Now we get the transformation matrix representing the position we want to set in the VICON world frame
@@ -168,7 +163,9 @@ class ViconPositionSetNode:
 
         # We can then extract the position and orientation from this transformation matrix
         p = T_R_D[0:3, -1]
-        q = tr.quaternion_from_matrix(T_R_D)
+        mat_params = matrix_to_params(T_R_D, type="quaternion")  # [x, y, z, qx, qy, qz, qw]
+        q = mat_params[3:]
+
 
         # If the position exceeds the safety bounds we set it to the safety bounds
         # For the horizontal, if if either abs(x) or abs(y) is greater than the safety bounds we set it to the safety bounds
