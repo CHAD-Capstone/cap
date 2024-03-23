@@ -70,85 +70,7 @@ from geometry_msgs.msg import Transform
 from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Vector3
 
-# From https://answers.ros.org/question/332407/transformstamped-to-transformation-matrix-python/
-def pose_to_pq(msg):
-    """Convert a C{geometry_msgs/Pose} into position/quaternion np arrays
-
-    @param msg: ROS message to be converted
-    @return:
-      - p: position as a np.array
-      - q: quaternion as a numpy array (order = [x,y,z,w])
-    """
-    p = np.array([msg.position.x, msg.position.y, msg.position.z])
-    q = np.array([msg.orientation.x, msg.orientation.y,
-                  msg.orientation.z, msg.orientation.w])
-    return p, q
-
-
-def pose_stamped_to_pq(msg):
-    """Convert a C{geometry_msgs/PoseStamped} into position/quaternion np arrays
-
-    @param msg: ROS message to be converted
-    @return:
-      - p: position as a np.array
-      - q: quaternion as a numpy array (order = [x,y,z,w])
-    """
-    return pose_to_pq(msg.pose)
-
-
-def transform_to_pq(msg):
-    """Convert a C{geometry_msgs/Transform} into position/quaternion np arrays
-
-    @param msg: ROS message to be converted
-    @return:
-      - p: position as a np.array
-      - q: quaternion as a numpy array (order = [x,y,z,w])
-    """
-    p = np.array([msg.translation.x, msg.translation.y, msg.translation.z])
-    q = np.array([msg.rotation.x, msg.rotation.y,
-                  msg.rotation.z, msg.rotation.w])
-    return p, q
-
-
-def transform_stamped_to_pq(msg):
-    """Convert a C{geometry_msgs/TransformStamped} into position/quaternion np arrays
-
-    @param msg: ROS message to be converted
-    @return:
-      - p: position as a np.array
-      - q: quaternion as a numpy array (order = [x,y,z,w])
-    """
-    return transform_to_pq(msg.transform)
-
-
-def msg_to_se3(msg):
-    """Conversion from geometric ROS messages into SE(3)
-
-    @param msg: Message to transform. Acceptable types - C{geometry_msgs/Pose}, C{geometry_msgs/PoseStamped},
-    C{geometry_msgs/Transform}, or C{geometry_msgs/TransformStamped}
-    @return: a 4x4 SE(3) matrix as a numpy array
-    @note: Throws TypeError if we receive an incorrect type.
-    """
-    if isinstance(msg, Pose):
-        p, q = pose_to_pq(msg)
-    elif isinstance(msg, PoseStamped):
-        p, q = pose_stamped_to_pq(msg)
-    elif isinstance(msg, Transform):
-        p, q = transform_to_pq(msg)
-    elif isinstance(msg, TransformStamped):
-        p, q = transform_stamped_to_pq(msg)
-    else:
-        raise TypeError("Invalid type for conversion to SE(3)")
-    norm = np.linalg.norm(q)
-    if np.abs(norm - 1.0) > 1e-3:
-        raise ValueError(
-            "Received un-normalized quaternion (q = {0:s} ||q|| = {1:3.6f})".format(
-                str(q), np.linalg.norm(q)))
-    elif np.abs(norm - 1.0) > 1e-6:
-        q = q / norm
-    g = tr.quaternion_matrix(q)
-    g[0:3, -1] = p
-    return g
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix
 
 class ViconPositionSetNode:
     def __init__(self, group_number, use_vicon):
@@ -173,8 +95,8 @@ class ViconPositionSetNode:
         self.current_local_position = None
         self.last_local_position_update_time = -1
 
-	self.safety_bounds_horizontal = 3
-	self.safety_bounds_vertical = 3
+        self.safety_bounds_horizontal = 3
+        self.safety_bounds_vertical = 3
 
         self.ready = False
 
@@ -214,7 +136,7 @@ class ViconPositionSetNode:
 
         # Ok, I don't know how to set that up properly so we are just going to use a transformation matrix
         # Get the transform from the vicon drone frame to the vicon world frame
-        T_V_D = msg_to_se3(self.current_vicon_transform.transform)
+        T_V_D = transform_stamped_to_matrix(self.current_vicon_transform)
         # Sanity check, set T_V_D to identity with position 1, 0, 0
         #T_V_D = np.eye(4)
         #T_V_D[0, 3] = 1
@@ -224,7 +146,7 @@ class ViconPositionSetNode:
         print("Vicon Transform Stamped", self.current_vicon_transform.transform)
         print("VICON World to Drone SE3", T_D_V)
         # Get the transform from the realsense drone frame to the realsense world frame
-        T_R_D = msg_to_se3(self.current_local_position.pose)
+        T_R_D = pose_stamped_to_matrix(self.current_local_position)
         # Sanity check, set T_R_D to identity
         #T_R_D = np.eye(4)
         print("Realsense euler angles (Drone to Realsense)", tr.euler_from_matrix(T_R_D))
@@ -238,7 +160,8 @@ class ViconPositionSetNode:
         print("VICON to Realsense Transform SE3", T_R_V)
 
         # Now we get the transformation matrix representing the position we want to set in the VICON world frame
-        T_V_D = msg_to_se3(msg)
+        T_V_D = pose_stamped_to_matrix(msg)
+
         # And then transform it to the realsense world frame
         # T_R_D = T_R_V @ T_V_D
         T_R_D = np.dot(T_R_V, T_V_D)

@@ -5,6 +5,20 @@ A node for capturing the data necessary to calibrate the camera extrinsics
 
 Captures images of the AprilTag and records the VICON pose at the same instant. The pose of the camera with
 respect to the tag is also recorded.
+
+Usage (Connected to remote ROS master for VICON):
+1. Run the realsense camera node
+2. Ensure VICON is running
+3. Run this node (`rosrun cap extrinsics_calibration/cal_extrinsics_node.py`)
+4. Place the tag on the ground such that the center is at the origin of the VICON frame
+5. Hold the drone above the tag and move it around to capture images from different angles
+
+The drone will take pictures only when it is perfectly still and it has moved since the last time it took a picture.
+
+Every time a picture is taken it is saved to the out_folder and a new extrinsics calibration matrix is computed.
+
+In order to use already captured data to recompute the extrinsics, pass the path to the data file as the recompute argument
+down in the main block.
 """
 
 import rospy

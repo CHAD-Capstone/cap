@@ -13,13 +13,6 @@ def get_corner_A_mm(tag_size):
     """
     Gets the 3D positions of the tag corners in the tag frame. The z component is always 0.
     """
-    # return np.array([
-    #     [-tag_size/2, -tag_size/2, 0],
-    #     [tag_size/2, -tag_size/2, 0],
-    #     [tag_size/2, tag_size/2, 0],
-    #     [-tag_size/2, tag_size/2, 0],
-    # ])
-
     return np.array([
         [tag_size/2, -tag_size/2, 0],
         [-tag_size/2, -tag_size/2, 0],
@@ -36,7 +29,7 @@ def get_tag_corners_mm(T_1_Ai, tag_corners_mm_Ai):
     tag_corners_mm_1 = tag_corners_mm_1[:3,:].T
     return tag_corners_mm_1
 
-def estimate_T_Ci_Ai(tag_corners_px, tag_corners_mm_Ai, camera_matrix, dist_coeffs):
+def estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs):
     """
     Estimates the transformation from the tag frame to the camera frame.
     tag_corners_px: nx2 numpy array of the corners of the tag in the image in pixel coordinates.
@@ -46,6 +39,8 @@ def estimate_T_Ci_Ai(tag_corners_px, tag_corners_mm_Ai, camera_matrix, dist_coef
     Returns:
     T_Ci_Ai: 4x4 numpy array of the transformation from the tag frame to the camera frame.
     """
+    tag_corners_mm_Ai = get_corner_A_mm(tag_size)
+
     # Define the 3D points of the tag corners in the tag frame. We assume that the tag is centered at the origin.
     tag_corners_mm = get_tag_corners_mm(np.eye(4), tag_corners_mm_Ai)
 
@@ -71,9 +66,8 @@ def get_pose_relative_to_apriltag(tag_corners_px, tag_size, camera_matrix, dist_
     Returns:
     T_A_C: 4x4 numpy array of the transformation from the camera frame to the tag frame
     """
-    tag_corners_mm_Ai = get_corner_A_mm(tag_size)
-    T_Ci_Ai = estimate_T_Ci_Ai(tag_corners_px, tag_corners_mm_Ai, camera_matrix, dist_coeffs)
-    T_A_C = np.linalg.inv(T_Ci_Ai)
+    T_C_A = estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs)
+    T_A_C = np.linalg.inv(T_C_A)
     return T_A_C
 
 def optimize_tag_pose(
@@ -81,7 +75,6 @@ def optimize_tag_pose(
     tag_px_positions: PxPositionMap,
     drone_poses: Dict[int, Pose],
     tag_size: float,
-    # tag_corners_mm_Ai: MmPositionMap,
     camera_matrix: np.ndarray,
     distortion_coefficients: np.ndarray,
     camera_extrinsics: Pose,
@@ -93,7 +86,6 @@ def optimize_tag_pose(
     tag_px_positions: The pixel positions of the tag corners in the image
     drone_poses: The poses of the drone when the images were taken. Given as the transformation matrix T_VICON_drone, that is the pose of the drone in the VICON frame / transformation from drone to VICON frame
     tag_size: The size of the tag in meters. Used to compute the 3D positions of the tag corners in the tag frame
-    Deprecated - tag_corners_mm_Ai: The 3D positions of the tag corners in the tag frame. The z component is always 0.
     camera_matrix: The camera intrinsics matrix
     distortion_coefficients: The camera distortion coefficients
     camera_extrinsics: The extrinsics of the camera in the Drone frame. Given as the transformation matrix T_drone_camera, that is the pose of the camera in the drone frame / transformation from camera to drone frame
