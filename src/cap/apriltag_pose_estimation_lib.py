@@ -3,6 +3,8 @@ import numpy as np
 from scipy.optimize import least_squares, approx_fprime
 import cv2
 from pupil_apriltags import Detector
+from pathlib import Path
+from typing import Union
 
 from cap.transformation_lib import matrix_to_params, params_to_matrix
 
@@ -19,6 +21,44 @@ detector = Detector(
     decode_sharpening=0.25,
     debug=0
 )
+
+class AprilTagMap:
+    """
+    Stores the poses of AprilTags in the VICON frame and allows for easy saving and loading of the data
+    Poses are stored as [x, y, z, qx, qy, qz, qw]
+    """
+    def __init__(self):
+        self.tag_poses = {}  # Maps from tag_id to pose
+
+    def add_tag_pose(self, tag_id, pose):
+        if tag_id in self.tag_poses:
+            print(f"Tag with id {tag_id} already exists. Overwriting the pose.")
+        if pose.shape == (7,):
+            self.tag_poses[tag_id] = pose
+        elif pose.shape == (4, 4):
+            self.tag_poses[tag_id] = matrix_to_params(pose, type='quaternion')
+        else:
+            raise ValueError("Pose must be in either quaternion or matrix form")
+
+    def get_pose(self, tag_id):
+        return self.tag_poses[tag_id]
+
+    def get_pose_homogeneous(self, tag_id):
+        return params_to_matrix(self.tag_poses[tag_id], type='quaternion')
+
+    def save_to_file(self, filename: Union[Path, str]):
+        if isinstance(filename, str):
+            filename = Path(filename)
+        np.save(filename, self.tag_poses)
+
+    @classmethod
+    def load_from_file(cls, filename: Union[Path, str]):
+        if isinstance(filename, str):
+            filename = Path(filename)
+        tag_poses = np.load(filename, allow_pickle=True).item()
+        tag_map = cls()
+        tag_map.tag_poses = tag_poses
+        return tag_map
 
 def detect_tags(img, use_ippe=True):
     """
