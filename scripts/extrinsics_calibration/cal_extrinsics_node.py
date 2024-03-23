@@ -21,21 +21,29 @@ In order to use already captured data to recompute the extrinsics, pass the path
 down in the main block.
 """
 
-import rospy
+try:
+    import rospy
+    from geometry_msgs.msg import TwistStamped, PoseStamped, TransformStamped
+    from mavros_msgs.msg import State
+except ImportError:
+    print("ROS NOT INSTALLED. RUNNING IN NON-ROS MODE. IF A ROS NODE IS REQUIRED, THIS WILL FAIL.")
+    rospy = None
 import nanocamera as nano
 import cv2
 from pathlib import Path
 import threading
 import time
-from geometry_msgs.msg import TwistStamped, PoseStamped, TransformStamped
-from mavros_msgs.msg import State
 import numpy as np
 from pupil_apriltags import Detector
 from typing import Union, Tuple
 from scipy.optimize import least_squares
 
 from cap.transformation_lib import ros_message_to_matrix, matrix_to_params, params_to_matrix
-from cap.apriltag_pose_estimation_lib import get_pose_relative_to_apriltag, get_corner_A_mm, get_expected_pixels
+from cap.apriltag_pose_estimation_lib import get_pose_relative_to_apriltag, get_corner_A_m, get_expected_pixels, detect_tags
+
+file_dir = Path(__file__).resolve().parent
+cap_pkg_dir = file_dir.parent.parent
+assert (cap_pkg_dir / "CMakeLists.txt").exists(), f"cap_pkg_dir: {cap_pkg_dir} does not appear to be the root of the cap package."
 
 def start_camera(flip=0, width=1280, height=720):
     # Connect to another CSI camera on the board with ID 1
@@ -70,7 +78,7 @@ def load_calibration_data(cal_file: Path) -> Tuple[np.ndarray, np.ndarray]:
     dist_coeffs = cal_data['dist']
     return camera_matrix, dist_coeffs
 
-def compute_extrinsics_avg(tag_pose, tag_size, corners, vicon_poses, camera_matrix, distortion_coefficients):
+def compute_extrinsics_avg(tag_pose, tag_size, corners, vicon_poses, camera_matrix, distortion_coefficients, imgs=None, out_dir=None):
     """
     Computes the camera extrinsics without optimizing the tag pose
 
@@ -79,10 +87,10 @@ def compute_extrinsics_avg(tag_pose, tag_size, corners, vicon_poses, camera_matr
     # Compute the relative poses of the camera with respect to the tag
     relative_poses = []
     for i in range(len(corners)):
-        relative_pose = get_pose_relative_to_apriltag(corners[i], tag_size, camera_matrix, distortion_coefficients)
-        # Convert from mm to m
-        relative_pose[:3, 3] /= 1000
+        img_corners = corners[i]
+        relative_pose = get_pose_relative_to_apriltag(img_corners, tag_size, camera_matrix, distortion_coefficients)
         relative_poses.append(relative_pose)
+
     # Relative poses now contains the transformation from the camera frame to the tag frame
     # We now want to compute T_marker_camera, the transformation from the camera frame to the marker frame
     # We currently have T_world_marker, the transformation from the marker frame to the world frame and
@@ -93,29 +101,21 @@ def compute_extrinsics_avg(tag_pose, tag_size, corners, vicon_poses, camera_matr
         T_world_marker = vicon_poses[i]
         T_tag_camera = relative_poses[i]
         T_marker_world = np.linalg.inv(T_world_marker)
-        print(T_marker_world)
-        print(tag_pose)
-        print(T_tag_camera)
-        print(f"Mulitplying: {T_marker_world.shape}, {tag_pose.shape}, {T_tag_camera.shape}")
         T_marker_camera = T_marker_world @ tag_pose @ T_tag_camera
         T_marker_cameras.append(T_marker_camera)
 
-    # # Now we average the T_marker_camera matrices
-    # # To do this we convert them to xyz, xyzw and average both (and renormalize the xyzw)
-    # T_params = [matrix_to_params(T, type="quaternion") for T in T_marker_cameras]
-    # # These are now [x y z qx qy qz qw] arrays
-    # T_xyz = np.mean([T[:3] for T in T_params], axis=0)
-    # T_xyzw = np.mean([T[3:] for T in T_params], axis=0)
-    # T_xyzw /= np.linalg.norm(T_xyzw)
-
-    # Sanity check: Take the first T_marker_camera and convert it to a matrix
-    return T_marker_cameras[0]
-
-
+    # Now we average the T_marker_camera matrices
+    # To do this we convert them to xyz, xyzw and average both (and renormalize the xyzw)
+    T_params = [matrix_to_params(T, type="quaternion") for T in T_marker_cameras]
+    # These are now [x y z qx qy qz qw] arrays
+    T_xyz = np.mean([T[:3] for T in T_params], axis=0)
+    T_xyzw = np.mean([T[3:] for T in T_params], axis=0)
+    T_xyzw /= np.linalg.norm(T_xyzw)
     T_avg = params_to_matrix(np.concatenate([T_xyz, T_xyzw]), type="quaternion")
-    return T_avg
 
-def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_poses, camera_matrix, distortion_coefficients):
+    return T_avg, tag_pose
+
+def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_poses, camera_matrix, distortion_coefficients, imgs=None, out_dir=None):
     """
     Jointly optimizes the tag pose and the camera extrinsics
     """
@@ -123,14 +123,14 @@ def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_po
     tag_params = matrix_to_params(initial_tag_pose)
 
     # Get initial extrinsics by using the average method
-    initial_extrinsics = compute_extrinsics_avg(initial_tag_pose, tag_size, corners_px, vicon_poses, camera_matrix, distortion_coefficients)
-    extrinsics_params = matrix_to_params(initial_extrinsics)
+    initial_extrinsics, _ = compute_extrinsics_avg(initial_tag_pose, tag_size, corners_px, vicon_poses, camera_matrix, distortion_coefficients)
+    extrinsics_params = matrix_to_params(initial_extrinsics)  # Encodes T_marker_camera as [x, y, z, roll, pitch, yaw]
 
     params = np.concatenate([tag_params, extrinsics_params])
 
     drone_poses = {i: vicon_poses[i] for i in range(len(vicon_poses))}
     tag_px_positions = {i: corners_px[i] for i in range(len(corners_px))}
-    tag_corners_mm_Ai = {img_idx: get_corner_A_mm(tag_size) for img_idx in range(len(vicon_poses))}
+    tag_corners_m_Ai = {i: get_corner_A_m(tag_size) for i in range(len(vicon_poses))}
 
     def error_func(params):
         """
@@ -142,13 +142,14 @@ def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_po
         tag_pose = params_to_matrix(tag_params, type="euler")
         camera_extrinsics = params_to_matrix(extrinsics_params, type="euler")
 
-        expected_pixels = get_expected_pixels(tag_pose, tag_px_positions, drone_poses, tag_corners_mm_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
+        expected_pixels = get_expected_pixels(tag_pose, tag_px_positions, drone_poses, tag_corners_m_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
         # Expected pixels is a map from image index to the expected pixel positions of the tag corners
         all_expected_pixels = []
         all_actual_pixels = []
         for img_idx in range(len(vicon_poses)):
             expected = expected_pixels[img_idx]
             actual = tag_px_positions[img_idx]
+
             all_expected_pixels.append(expected)
             all_actual_pixels.append(actual)
         all_expected_pixels = np.array(all_expected_pixels)
@@ -156,9 +157,9 @@ def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_po
 
         error = all_expected_pixels - all_actual_pixels
 
-        return error
+        return error.flatten()
 
-    result = least_squares(error_func, params, jac=jacobian_func, verbose=2)
+    result = least_squares(error_func, params, verbose=2)
     optimized_params = result.x
 
     optimized_tag_params = optimized_params[:6]
@@ -167,8 +168,7 @@ def compute_extrinsics_optimize(initial_tag_pose, tag_size, corners_px, vicon_po
     optimized_tag_pose = params_to_matrix(optimized_tag_params, type="euler")
     optimized_extrinsics = params_to_matrix(optimized_extrinsics_params, type="euler")
 
-    return optimized_extrinsics
-
+    return optimized_extrinsics, optimized_tag_pose
 
 def compute_extrinsics(tag_pose, tag_size, imgs, corners_px, vicon_poses, camera_matrix, distortion_coefficients, optimize=False):
     """
@@ -194,15 +194,76 @@ def compute_extrinsics(tag_pose, tag_size, imgs, corners_px, vicon_poses, camera
     else:
         return compute_extrinsics_avg(tag_pose, tag_size, corners_px, vicon_poses, camera_matrix, distortion_coefficients)
 
+def compute_and_test_extrinsics(tag_id, tag_pose, tag_size_m, imgs, corners, vicon_poses, camera_matrix, distortion_coefficients, out_folder: Path, optimize=False):
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    # Recompute the corners
+    new_corners = []
+    for img in imgs:
+        tags = detect_tags(img, use_ippe=True)
+        if tag_id not in tags:
+            rospy.logwarn("Tag not found in image.")
+            return False
+        new_corners.append(tags[tag_id])
+    corners = new_corners
+
+    # Compute the extrinsics
+    extrinsics, tag_pose = compute_extrinsics(
+        tag_pose,
+        tag_size_m,
+        imgs,
+        corners,
+        vicon_poses,
+        camera_matrix,
+        distortion_coefficients,
+        optimize=optimize
+    )
+
+    print(f"Extracted extrinsics: {extrinsics}")
+
+    # Compute the expected positions in each image, plot the corners, and save to a /results folder
+    img_folder = out_folder / "img_results"
+    img_folder.mkdir(parents=True, exist_ok=True)
+
+    # Convert the drone poses to homogenous transformation matrices
+    vicon_poses_homog = [params_to_matrix(p, type="quaternion") for p in vicon_poses]
+    
+    drone_poses = {i: vicon_poses_homog[i] for i in range(len(vicon_poses))}
+    tag_px_positions = {i: corners[i] for i in range(len(corners))}
+    tag_corners_m_Ai = {img_idx: get_corner_A_m(tag_size_m) for img_idx in range(len(vicon_poses))}
+    expected_pixels = get_expected_pixels(tag_pose, tag_px_positions, drone_poses, tag_corners_m_Ai, camera_matrix, distortion_coefficients, extrinsics)
+
+    # color_order = ['r', 'g', 'b', 'k']  # Used to color the true corners
+    color_order = [(0, 0, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0)]
+    # Show the images with the corners plotted
+    for img_idx in range(len(imgs)):
+        img = imgs[img_idx].copy()
+        img_corners = corners[img_idx]
+        expected = expected_pixels[img_idx]
+        # Convert to pixels
+        expected = np.array(expected).astype(int)
+        for i in range(len(img_corners)):
+            color = color_order[i]
+            corner = img_corners[i]
+            corner = (int(corner[0]), int(corner[1]))
+            expected_corner = expected[i]
+            # Draw the true corner with the correct color
+            cv2.circle(img, corner, 5, color, -1)
+            # Draw the expected corner
+            cv2.circle(img, (expected_corner[0], expected_corner[1]), 5, color, -1)
+        cv2.imwrite(str(img_folder / f"image_{img_idx}.jpg"), img)
+
+    np.save(out_folder / "extrinsics_calibration.npy", extrinsics)
 class ExtrinsicsCalibrationNode:
     def __init__(
         self,
         group_id: int = 6,
         tag_id: int = 1,
-        tag_size_mm: float = 130,
+        tag_size_m: float = 130 / 1000,
         tag_pose: Union[np.ndarray, None] = None,
-        out_folder: Path = Path("/home/rob498/catkin_ws/src/cap/data/extrinsics_calibration"),
-        camera_intrinsics_path: Path = Path("/home/rob498/catkin_ws/src/cap/data/cal/f0_w1280_h720/cal.npz"),
+        out_folder: Path = cap_pkg_dir / "data" / "extrinsics_calibration",
+        camera_intrinsics_path: Path = cap_pkg_dir / "data" / "final_calibration" / "cal.npz",
+        use_optimize: bool = False,
         recompute: Path = None
     ):
         """
@@ -215,7 +276,12 @@ class ExtrinsicsCalibrationNode:
             tag_pose = np.eye(4)
         self.tag_pose = tag_pose
         self.tag_id = tag_id
-        self.tag_size_mm = tag_size_mm
+        self.tag_size_m = tag_size_m
+        self.use_optimize = use_optimize
+
+        # Prepare structures for holding the calibration information
+        self.out_folder = out_folder
+        self.out_folder.mkdir(parents=True, exist_ok=True)
 
         if recompute is not None:
             data = np.load(recompute, allow_pickle=True).item()
@@ -226,60 +292,9 @@ class ExtrinsicsCalibrationNode:
             self.camera_matrix, self.dist_coeffs = load_calibration_data(camera_intrinsics_path)
             self.tag_pose = tag_pose
             self.tag_id = tag_id
-            self.tag_size_mm = tag_size_mm
+            self.tag_size_m = tag_size_m
 
-            self.out_folder = out_folder
-            self.out_folder.mkdir(parents=True, exist_ok=True)
-
-            # Compute the extrinsics
-            extrinsics = compute_extrinsics(
-                self.tag_pose,
-                self.tag_size_mm,
-                self.imgs,
-                self.corners,
-                self.vicon_poses,
-                self.camera_matrix,
-                self.dist_coeffs,
-                optimize=False
-            )
-
-            print(f"Extracted extrinsics: {extrinsics}")
-
-            # Compute the expected positions in each image, plot the corners, and save to a /results folder
-            img_folder = self.out_folder / "img_results"
-            img_folder.mkdir(parents=True, exist_ok=True)
-
-            # Convert the drone poses to homogenous transformation matrices
-            vicon_poses_homog = [params_to_matrix(p, type="quaternion") for p in self.vicon_poses]
-            
-            drone_poses = {i: vicon_poses_homog[i] for i in range(len(self.vicon_poses))}
-            tag_px_positions = {i: self.corners[i] for i in range(len(self.corners))}
-            tag_corners_mm_Ai = {img_idx: get_corner_A_mm(self.tag_size_mm) for img_idx in range(len(self.vicon_poses))}
-            expected_pixels = get_expected_pixels(self.tag_pose, tag_px_positions, drone_poses, tag_corners_mm_Ai, self.camera_matrix, self.dist_coeffs, extrinsics)
-
-            print(expected_pixels)
-
-            # color_order = ['r', 'g', 'b', 'k']  # Used to color the true corners
-            color_order = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 0, 0)]
-            # Show the images with the corners plotted
-            for img_idx in range(len(self.imgs)):
-                img = self.imgs[img_idx]
-                corners = self.corners[img_idx]
-                expected = expected_pixels[img_idx]
-                # Convert to pixels
-                expected = np.array(expected).astype(int)
-                for i in range(len(corners)):
-                    color = color_order[i]
-                    corner = corners[i]
-                    corner = (int(corner[0]), int(corner[1]))
-                    expected_corner = expected[i]
-                    # Draw the true corner with the correct color
-                    cv2.circle(img, corner, 5, color, -1)
-                    # Draw the expected corner
-                    cv2.circle(img, (expected_corner[0], expected_corner[1]), 5, color, -1)
-                cv2.imwrite(str(img_folder / f"image_{img_idx}.jpg"), img)
-
-            np.save(self.out_folder / "extrinsics_calibration.npy", extrinsics)
+            compute_and_test_extrinsics(self.tag_id, self.tag_pose, self.tag_size_m, self.imgs, self.corners, self.vicon_poses, self.camera_matrix, self.dist_coeffs, self.out_folder, optimize=self.use_optimize)
             return
 
         cam_up, codes, self.camera = start_camera()
@@ -333,10 +348,6 @@ class ExtrinsicsCalibrationNode:
 
         # Load the camera intrinsics
         self.camera_matrix, self.dist_coeffs = load_calibration_data(camera_intrinsics_path)
-
-        # Prepare structures for holding the calibration information
-        self.out_folder = out_folder
-        self.out_folder.mkdir(parents=True, exist_ok=True)
 
         self.imgs = []
         self.corners = []
@@ -397,27 +408,13 @@ class ExtrinsicsCalibrationNode:
         # convert to greyscale
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         print(f"Shape of image: {img.shape}")
-        tags = self.detector.detect(img)
-        desired_tag = None
-        for tag in tags:
-            print(f"Saw tag id {tag.tag_id}")
-            if tag.tag_id == self.tag_id:
-                print(f"Found tag id {tag.tag_id}")
-                desired_tag = tag
-                break
-        
-        if desired_tag is None:
+
+        tags = detect_tags(img, use_ippe=True)
+        if self.tag_id not in tags:
             rospy.logwarn("Tag not found in image.")
             return False, None
-
-        corners = desired_tag.corners
-
-        # relative_pose = get_pose_relative_to_apriltag(tag.corners, self.tag_pose, self.camera_matrix, self.dist_coeffs)
-        # Relative pose is the pose of the camera with respect to the tag
-        # In other words, it is the transformation from the camera frame to the tag frame
-
-        # return relative_pose, corners
-        return True, corners
+        
+        return True, tags[self.tag_id]
 
     def process_img(self, img, vicon_pose):
         """
@@ -484,17 +481,18 @@ class ExtrinsicsCalibrationNode:
             }
         )
 
-        extrinsics = compute_extrinsics(
+        compute_and_test_extrinsics(
+            self.tag_id,
             self.tag_pose,
-            self.tag_size_mm,
+            self.tag_size_m,
             self.imgs,
             self.corners,
             self.vicon_poses,
             self.camera_matrix,
             self.dist_coeffs,
-            optimize=False
+            self.out_folder,
+            optimize=self.use_optimize
         )
-        np.save(self.out_folder / "extrinsics_calibration.npy", extrinsics)
 
         # Save the images to the output folder
         img_folder = self.out_folder / "images"
@@ -527,13 +525,14 @@ class ExtrinsicsCalibrationNode:
 
 if __name__ == "__main__":
     node = None
-    recompute = Path("/home/rob498/catkin_ws/src/cap/data/extrinsics_calibration_try_3_in_progress/extrinsics_calibration_data.npy")
+    recompute = cap_pkg_dir / "data" / "extrinsics_calibration" / "extrinsics_calibration_data.npy"
     # recompute = None
     try:
         node = ExtrinsicsCalibrationNode(
             tag_id=2,  # The large tag on each tag group has id 2*the number on the paper. So paper 1 has tag 2, paper 2 has tag 4, etc.
-            tag_size_mm=130,
-            recompute=recompute
+            tag_size_m=130 / 1000,
+            recompute=recompute,
+            use_optimize=True
         )
         if recompute is None:
             print("Starting image loop.")

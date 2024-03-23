@@ -2,49 +2,88 @@ from typing import List, Tuple, Dict
 import numpy as np
 from scipy.optimize import least_squares, approx_fprime
 import cv2
+from pupil_apriltags import Detector
 
 from cap.transformation_lib import matrix_to_params, params_to_matrix
 
 PxPositionMap = Dict[int, List[Tuple[int, int]]]  # image_index -> [(x, y)]
-MmPositionMap = Dict[int, List[Tuple[float, float, float]]]  # image_index -> [(x, y, z=0)]
+MPositionMap = Dict[int, List[Tuple[float, float, float]]]  # image_index -> [(x, y, z=0)]
 Pose = np.ndarray  # 4x4 homogeneous transformation matrix
 
-def get_corner_A_mm(tag_size):
+detector = Detector(
+    families="tag36h11",
+    nthreads=1,
+    quad_decimate=1.0,
+    quad_sigma=0.0,
+    refine_edges=1,
+    decode_sharpening=0.25,
+    debug=0
+)
+
+def detect_tags(img, use_ippe=True):
+    """
+    Finds the AprilTags in the image and returns their pixel location.
+    Pixel locations can be permuted to match the order needed to use SOLVEPNP_IPPE_SQUARE in the solvePnP function.
+
+    Returns:
+    tag_positions: Map of tag_id -> corners_px
+    """
+    if len(img.shape) == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    tags = detector.detect(img)
+    tag_positions = {}
+    for tag in tags:
+        corners_px = tag.corners
+        if use_ippe:
+            corners_px = corners_px[[0, 3, 2, 1]]  # Gets into the order defined by https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html
+        tag_positions[tag.tag_id] = corners_px
+    return tag_positions
+
+def get_corner_A_m(tag_size, use_ippe=True):
     """
     Gets the 3D positions of the tag corners in the tag frame. The z component is always 0.
     """
-    return np.array([
-        [tag_size/2, -tag_size/2, 0],
-        [-tag_size/2, -tag_size/2, 0],
+    base = np.array([
+        [tag_size/2, tag_size/2, 0],
         [-tag_size/2, tag_size/2, 0],
-        [tag_size/2, tag_size/2, 0]
+        [-tag_size/2, -tag_size/2, 0],
+        [tag_size/2, -tag_size/2, 0],
     ])
+    if use_ippe:
+        # For use with the SOLVEPNP_IPPE_SQUARE flag
+        return base[[1, 0, 3, 2]]  # As defined by https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html
+    else:
+        return base[[3, 2, 1, 0]]
 
-def get_tag_corners_mm(T_1_Ai, tag_corners_mm_Ai):
+def get_tag_corners_m(T_1_Ai, tag_corners_m_Ai):
     """
     Gets the 3D coordinates of the corners of the tag in the base frame.
     """
     # Transform the tag corners from the tag frame to the base frame
-    tag_corners_mm_1 = T_1_Ai @ np.hstack((tag_corners_mm_Ai, np.ones((len(tag_corners_mm_Ai),1)))).T
-    tag_corners_mm_1 = tag_corners_mm_1[:3,:].T
-    return tag_corners_mm_1
+    tag_corners_m_1 = T_1_Ai @ np.hstack((tag_corners_m_Ai, np.ones((len(tag_corners_m_Ai),1)))).T
+    tag_corners_m_1 = tag_corners_m_1[:3,:].T
+    return tag_corners_m_1
 
-def estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs):
+def estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs, use_ippe=True):
     """
     Estimates the transformation from the tag frame to the camera frame.
     tag_corners_px: nx2 numpy array of the corners of the tag in the image in pixel coordinates.
-    tag_size: The size of the tag in mm.
+    tag_size: The size of the tag in m.
     camera_matrix: 3x3 numpy array of the camera intrinsic parameters.
     dist_coeffs: 5x1 numpy array of the camera distortion coefficients.
     Returns:
     T_Ci_Ai: 4x4 numpy array of the transformation from the tag frame to the camera frame.
     """
-    tag_corners_mm_Ai = get_corner_A_mm(tag_size)
+    tag_corners_m_Ai = get_corner_A_m(tag_size, use_ippe)
 
     # Define the 3D points of the tag corners in the tag frame. We assume that the tag is centered at the origin.
-    tag_corners_mm = get_tag_corners_mm(np.eye(4), tag_corners_mm_Ai)
+    tag_corners_m = get_tag_corners_m(np.eye(4), tag_corners_m_Ai)
 
-    _, R, t = cv2.solvePnP(tag_corners_mm, tag_corners_px, camera_matrix, dist_coeffs)#, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if use_ippe:
+        # For use with the SOLVEPNP_IPPE_SQUARE flag
+        _, R, t = cv2.solvePnP(tag_corners_m, tag_corners_px, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    else:
+        _, R, t = cv2.solvePnP(tag_corners_m, tag_corners_px, camera_matrix, dist_coeffs)
     
     # Convert the rotation vector to a rotation matrix
     R, _ = cv2.Rodrigues(R)
@@ -56,19 +95,41 @@ def estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs):
 
     return T_Ci_Ai
 
-def get_pose_relative_to_apriltag(tag_corners_px, tag_size, camera_matrix, dist_coeffs):
+def get_pose_relative_to_apriltag(tag_corners_px, tag_size, camera_matrix, dist_coeffs, use_ippe=True):
     """
     Estimates the transformation from the tag frame to the camera frame.
     tag_corners_px: nx2 numpy array of the corners of the tag in the image in pixel coordinates.
-    tag_size: The size of the tag in mm.
+    tag_size: The size of the tag in m.
     camera_matrix: 3x3 numpy array of the camera intrinsic parameters.
     dist_coeffs: 5x1 numpy array of the camera distortion coefficients.
     Returns:
     T_A_C: 4x4 numpy array of the transformation from the camera frame to the tag frame
     """
-    T_C_A = estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs)
+    T_C_A = estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs, use_ippe)
     T_A_C = np.linalg.inv(T_C_A)
     return T_A_C
+
+def get_marker_pose(tag_pose, tag_corners_px, tag_size, camera_matrix, dist_coeffs, extrinsics, use_ippe=True):
+    """
+    Estimates the pose of the VICON marker in the VICON frame
+    Parameters:
+    tag_pose: The pose of the tag in the VICON frame (T_VICON_tag)
+    tag_corners_px: The pixel positions of the tag corners in the image
+    tag_size: The size of the tag in m. Used to compute the 3D positions of the tag corners in the tag frame
+    camera_matrix: The camera intrinsics matrix
+    dist_coeffs: The camera distortion coefficients
+    extrinsics: The extrinsics of the camera in the Drone frame. Given as the transformation matrix T_marker_camera, that is the pose of the camera in the drone frame / transformation from camera to drone frame
+    """
+    # Get the pose of the camera with respect to the AprilTag frame (T_tag_cam)
+    T_tag_cam = get_pose_relative_to_apriltag(tag_corners_px, tag_size, camera_matrix, dist_coeffs, use_ippe)
+    # Get the pose of the marker with respect to the tag frame
+    # T_tag_marker = T_tag_cam @ T_marker_cam
+    T_tag_marker = T_tag_cam @ extrinsics
+    # Then we get the position of the marker with respect to the VICON frame
+    # T_VICON_marker = T_VICON_tag @ T_tag_marker
+    T_VICON_marker = tag_pose @ T_tag_marker
+    return T_VICON_marker
+
 
 def optimize_tag_pose(
     initial_tag_pose: Pose,
@@ -97,13 +158,13 @@ def optimize_tag_pose(
     # params = params_from_T(initial_tag_pose)  # [x, y, z, roll, pitch, yaw]
     params = matrix_to_params(initial_tag_pose, type='euler')
 
-    tag_corners_mm_Ai = {img_idx: get_corner_A_mm(tag_size) for img_idx in all_img_idxs}
+    tag_corners_m_Ai = {img_idx: get_corner_A_m(tag_size) for img_idx in all_img_idxs}
 
     def err_func(params):
         # tag_pose = T_from_params(params)
         tag_pose = params_to_matrix(params, type='euler')
 
-        expected_pixels: PxPositionMap = get_expected_pixels(tag_pose, tag_px_positions, drone_poses, tag_corners_mm_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
+        expected_pixels: PxPositionMap = get_expected_pixels(tag_pose, tag_px_positions, drone_poses, tag_corners_m_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
 
         all_expected_pixels = []
         all_actual_pixels = []
@@ -123,7 +184,7 @@ def optimize_tag_pose(
         # tag_pose = T_from_params(params)
         tag_pose = params_to_matrix(params, type='euler')
 
-        jacobian = find_jacobian(tag_pose, tag_px_positions, drone_poses, tag_corners_mm_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
+        jacobian = find_jacobian(tag_pose, tag_px_positions, drone_poses, tag_corners_m_Ai, camera_matrix, distortion_coefficients, camera_extrinsics)
 
         return jacobian
 
@@ -152,7 +213,7 @@ def get_expected_pixels(
     tag_pose: Pose,
     tag_px_positions: PxPositionMap,
     drone_poses: Dict[int, Pose],
-    tag_corners_mm_Ai: MmPositionMap,
+    tag_corners_m_Ai: MPositionMap,
     camera_matrix: np.ndarray,
     distortion_coefficients: np.ndarray,
     camera_extrinsics: Pose,
@@ -175,12 +236,12 @@ def get_expected_pixels(
     R_V_A, t_V_A = get_rotation_and_translation(tag_pose)  # Transformation to VICON from AprilTag
 
     for img_idx, drone_pose in drone_poses.items():
-        tag_corner_position_mm = tag_corners_mm_Ai[img_idx]
+        tag_corner_position_m = tag_corners_m_Ai[img_idx]
         curr_corner_px_positions = tag_px_positions[img_idx]
         expected_pixels[img_idx] = []
-        for corner_idx in range(len(tag_corner_position_mm)):
+        for corner_idx in range(len(tag_corner_position_m)):
             # Get the position of the corner in the VICON frame
-            tag_corner_pose_m = tag_corner_position_mm[corner_idx] / 1000  # Convert from mm to m
+            tag_corner_pose_m = tag_corner_position_m[corner_idx]
             p_V = R_V_A @ tag_corner_pose_m + t_V_A
 
             # Get the position of the corner in the camera frame
@@ -201,7 +262,7 @@ def find_jacobian(
     tag_pose: Pose,
     tag_px_positions: PxPositionMap,
     drone_poses: Dict[int, Pose],
-    tag_corners_mm_Ai: MmPositionMap,
+    tag_corners_m_Ai: MPositionMap,
     camera_matrix: np.ndarray,
     distortion_coefficients: np.ndarray,
     camera_extrinsics: Pose,
@@ -212,7 +273,7 @@ def find_jacobian(
     tag_pose: The pose of the tag in the VICON frame
     tag_px_positions: The pixel positions of the tag corners in the image
     drone_poses: The poses of the drone when the images were taken. Given as the transformation matrix T_VICON_drone, that is the pose of the drone in the VICON frame / transformation from drone to VICON frame
-    tag_corners_mm_Ai: The 3D positions of the tag corners in the tag frame. The z component is always 0.
+    tag_corners_m_Ai: The 3D positions of the tag corners in the tag frame. The z component is always 0.
     camera_matrix: The camera intrinsics matrix
     distortion_coefficients: The camera distortion coefficients
     camera_extrinsics: The extrinsics of the camera in the Drone frame. Given as the transformation matrix T_drone_camera, that is the pose of the camera in the drone frame / transformation from camera to drone frame
@@ -222,7 +283,7 @@ def find_jacobian(
     Variable order: [x, y, z, roll, pitch, yaw]
     """
     all_img_idxs = sorted(tag_px_positions.keys())
-    num_corners_per_tag = len(tag_corners_mm_Ai[all_img_idxs[0]])
+    num_corners_per_tag = len(tag_corners_m_Ai[all_img_idxs[0]])
 
     jacobian = np.zeros((2 * len(all_img_idxs) * num_corners_per_tag, 6))
 
@@ -241,14 +302,14 @@ def find_jacobian(
     for img_idx in all_img_idxs:
         drone_pose = drone_poses[img_idx]
         curr_corner_px_positions = tag_px_positions[img_idx]
-        for corner_idx in range(len(tag_corners_mm_Ai[img_idx])):
-            corner_pos_mm = tag_corners_mm_Ai[img_idx][corner_idx]
+        for corner_idx in range(len(tag_corners_m_Ai[img_idx])):
+            corner_pos_m = tag_corners_m_Ai[img_idx][corner_idx]
 
             # Compute intermediate values
             T_V_Ci = drone_pose @ camera_extrinsics
             R_V_Ci, t_V_Ci = get_rotation_and_translation(T_V_Ci)
 
-            p_v = R_V_A @ corner_pos_mm + t_V_A  # (3,)
+            p_v = R_V_A @ corner_pos_m + t_V_A  # (3,)
             p_ci = R_V_Ci.T @ (p_v - t_V_Ci)  # (3,)
             yi = camera_matrix @ p_ci  # (3,)
 
@@ -264,9 +325,9 @@ def find_jacobian(
 
             d_xi_d_pv = d_xi_d_yi @ d_yi_d_p_ci @ d_p_ci_d_p_v  # (2, 3)
 
-            d_pv_d_yaw   = X_bar_z @ R_A_z   @ R_A_y   @ R_A_x @ corner_pos_mm  # (3,)
-            d_pv_d_pitch = R_A_z   @ X_bar_y @ R_A_y   @ R_A_x @ corner_pos_mm  # (3,)
-            d_pv_d_roll  = R_A_z   @ R_A_y   @ X_bar_x @ R_A_x @ corner_pos_mm  # (3,)
+            d_pv_d_yaw   = X_bar_z @ R_A_z   @ R_A_y   @ R_A_x @ corner_pos_m  # (3,)
+            d_pv_d_pitch = R_A_z   @ X_bar_y @ R_A_y   @ R_A_x @ corner_pos_m  # (3,)
+            d_pv_d_roll  = R_A_z   @ R_A_y   @ X_bar_x @ R_A_x @ corner_pos_m  # (3,)
 
             # Compute rotational derivatives
             d_xi_d_yaw = d_xi_d_pv @ d_pv_d_yaw  # (2,)

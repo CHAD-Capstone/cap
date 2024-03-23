@@ -24,6 +24,7 @@ def calibrate(checker_size_mm: int, cal_img_dir: Path, pattern_shape: Tuple[int,
     if fisheye:
         print("Using fisheye calibration.")
 
+    index_map = []  # Index in the original list of images of the n-th image that was successfully processed
     for i, fname in enumerate(cal_img_files):
         print(f"Processing image {i+1}/{len(cal_img_files)}: {fname.absolute().as_posix()}")
         img = cv2.imread(fname.absolute().as_posix())
@@ -40,6 +41,7 @@ def calibrate(checker_size_mm: int, cal_img_dir: Path, pattern_shape: Tuple[int,
             if visualize:
                 cv2.imshow('img', img)
                 cv2.waitKey(500)
+            index_map.append(i)
         else:
             print(f"Could not find corners in image {fname.absolute().as_posix()}")
     cv2.destroyAllWindows()
@@ -70,6 +72,7 @@ def calibrate(checker_size_mm: int, cal_img_dir: Path, pattern_shape: Tuple[int,
     else:
         print("Calibrating camera.")
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
+        assert len(rvecs) == len(index_map)
 
     print(f"Calibration complete. RMS error: {ret}")
     print(f"Camera Matrix:\n{mtx}")
@@ -96,32 +99,39 @@ def calibrate(checker_size_mm: int, cal_img_dir: Path, pattern_shape: Tuple[int,
             newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
             dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
         x, y, w, h = roi
-        # dst = dst[y:y+h, x:x+w]
+        dst = dst[y:y+h, x:x+w]
         cv2.imwrite(str(undistorted_dir / fname.name), dst)
 
-    # # Project the expected position of the calibration back into the images to visualize the calibration
-    # reprojected_dir = cal_img_dir / "reprojected"
-    # reprojected_dir.mkdir(exist_ok=True)
+    # Project the expected position of the calibration back into the images to visualize the calibration
+    reprojected_dir = cal_img_dir / "reprojected"
+    reprojected_dir.mkdir(exist_ok=True)
 
-    # for i, fname in enumerate(cal_img_files):
-    #     if fisheye:
-    #         print(f"Reprojecting fisheye image {i+1}/{len(cal_img_files)}: {fname.absolute().as_posix()}")
-    #     else:
-    #         print(f"Reprojecting image {i+1}/{len(cal_img_files)}: {fname.absolute().as_posix()}")
+    for i, processed_index in enumerate(index_map):
+        fname = cal_img_files[processed_index]
+        if fisheye:
+            print(f"Reprojecting fisheye image {processed_index+1}/{len(cal_img_files)}: {fname.absolute().as_posix()}")
+        else:
+            print(f"Reprojecting image {processed_index+1}/{len(cal_img_files)}: {fname.absolute().as_posix()}")
         
-    #     rvec = rvecs[i]
-    #     tvec = tvecs[i]
+        rvec = rvecs[i]
+        tvec = tvecs[i]
 
-    #     img = cv2.imread(fname.absolute().as_posix())
-    #     h,  w = img.shape[:2]
+        img = cv2.imread(fname.absolute().as_posix())
+        h,  w = img.shape[:2]
 
-    #     # Project the 4 corners of the board back into the image
-    #     axis = np.float32([[0,0,0], [0,1,0], [1,1,0], [1,0,0]]).reshape(-1,3)
-    #     imgpts, jac = cv2.projectPoints(axis, rvec, tvec, mtx, dist)
-    #     imgpts = np.int32(imgpts).reshape(-1,2)
-    #     img = cv2.drawContours(img, [imgpts[:4]], -1, (0,255,0), 3)
+        # Project a square around one of the squares in the checkerboard
+        axis = np.float32([[0,0,0], [0,1,0], [1,1,0], [1,0,0]]).reshape(-1,3) * checker_size_mm
+        imgpts, jac = cv2.projectPoints(axis, rvec, tvec, mtx, dist)
+        imgpts = np.int32(imgpts).reshape(-1,2)
+        img = cv2.drawContours(img, [imgpts[:4]], -1, (0,255,0), 3)
 
-    #     cv2.imwrite(str(reprojected_dir / fname.name), img)
+        # Project a rectangle around the entire checkerboard
+        axis = np.float32([[0,0,0], [0,pattern_shape[1]-1,0], [pattern_shape[0]-1,pattern_shape[1]-1,0], [pattern_shape[0]-1,0,0], [0,0,0]]).reshape(-1,3) * checker_size_mm
+        imgpts, jac = cv2.projectPoints(axis, rvec, tvec, mtx, dist)
+        imgpts = np.int32(imgpts).reshape(-1,2)
+        img = cv2.drawContours(img, [imgpts[:4]], -1, (255,0,0), 3)
+
+        cv2.imwrite(str(reprojected_dir / fname.name), img)
 
     return mtx, dist
 

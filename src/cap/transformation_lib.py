@@ -1,6 +1,11 @@
+try:
+    from geometry_msgs.msg import TransformStamped, PoseStamped
+except ImportError:
+    print("RUNNING IN NON-ROS ENVIRONMENT")
+
 import numpy as np
 from scipy.spatial.transform import Rotation
-from geometry_msgs.msg import TransformStamped, PoseStamped
+
 
 def transform_stamped_to_matrix(transform_stamped):
     """

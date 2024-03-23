@@ -11,3 +11,5 @@ This library has helper functions for:
 1. Estimating the pose of an AprilTag in the camera frame (`estimate_T_C_A`)
 2. Getting the pose of the camera in the AprilTag frame (`get_pose_relative_to_apriltag`)
 3. Optimizing the pose of an AprilTag in the VICON frame given multiple images of the tag (`optimize_tag_pose`)
+4. Extract the corner locations of AprilTags from an image using the IPPE order (`detect_tags`)
+5. Get the position of the drone (marker) in the VICON frame (`get_marker_pose`)
