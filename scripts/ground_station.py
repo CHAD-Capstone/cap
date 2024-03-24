@@ -8,6 +8,7 @@ from threading import Thread
 import rospy
 from std_srvs.srv import Empty
 from cap_srvs.srv import TagPoses
+from cap_srvs.srv import SetPosition
 from cap_msgs.msg import TagTransform
 from geometry_msgs.msg import TransformStamped
 
@@ -29,6 +30,8 @@ class GroundStationNode:
         self.land_client = rospy.ServiceProxy(f'{comms_node_name}/comm/land', Empty)
         rospy.wait_for_service(f'{comms_node_name}/comm/abort')
         self.abort_client = rospy.ServiceProxy(f'{comms_node_name}/comm/abort', Empty)
+        rospy.wait_for_service(f'{comms_node_name}/comm/set_position')
+        self.set_position_client = rospy.ServiceProxy(f'{comms_node_name}/comm/set_position', SetPosition)
 
         rospy.wait_for_service(f'{comms_node_name}/comm/begin_mapping')
         self.begin_mapping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_mapping', TagPoses)
@@ -43,27 +46,32 @@ class GroundStationNode:
         The execution of the command is done in a separate thread so that the input loop can continue to accept commands
         while the service call is ongoing. This is important to allow abort commands to be sent at any time.
         """
-        def execute_command(command: str):
+        def execute_command(command: str, *args, **kwargs):
             if command == 't':
-                self.ping_client()
+                self.ping()
             elif command == 'l':
-                self.launch_client()
+                self.launch()
             elif command == 'd':
-                self.land_client()
+                self.land()
             elif command == 'a':
-                self.abort_client()
+                self.abort()
+            elif command == 's':
+                self.set_position(*args)
             elif command == 'm':
-                self.begin_mapping_client()
+                self.begin_mapping()
             elif command == 'i':
-                self.begin_inspecting_client()
+                self.begin_inspecting()
             else:
                 print(f"Invalid command: {command}")
         
         while True:
-            command = input("Enter command (t=ping, l=launch, d=land, a=abort, m=begin mapping, i=begin inspecting): ")
+            command = input("Enter command (t=ping, l=launch, d=land, a=abort, s=set position, m=begin mapping, i=begin inspecting, q=quit): ")
             if command == 'q':
                 break
-            Thread(target=execute_command, args=(command,), daemon=True).start()
+            if command == 's':
+                position = input("Enter position (x y z): ")
+                position = [float(coord) for coord in position.split()]
+            Thread(target=execute_command, args=(command, position), daemon=True).start()
 
     def ping(self):
         self.ping_client()
@@ -76,6 +84,19 @@ class GroundStationNode:
 
     def abort(self):
         self.abort_client()
+
+    def set_position(self, position: list):
+        # Ensure that the position has 3 coordinates and is not too near the ground
+        if len(position) != 3 or position[2] < 0.5:
+            print("Invalid position")
+            return
+        res = self.set_position_client(position)
+        suc = res.success
+        msg = res.message
+        if suc:
+            print("Successfully set position")
+        else:
+            print(f"Failed to set position: {msg}")
 
     def begin_mapping(self):
         approximate_tag_map = load_approximate_tag_poses()
