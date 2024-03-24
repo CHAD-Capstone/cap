@@ -63,6 +63,8 @@ class CommsNode:
         rospy.wait_for_service("/mavros/set_mode")
         self.set_mode_client = rospy.ServiceProxy("/mavros/set_mode", SetMode)
 
+        self.local_pos_pub = rospy.Publisher("/capdrone/setpoint_position/local", PoseStamped, queue_size=10)
+
         # Wait for other nodes to be ready
         self.ready_services = [
             "/capdrone/vicon_set_position/ready",  # The vicon_set_position node
