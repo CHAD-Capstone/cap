@@ -46,15 +46,28 @@ class AprilTagMap:
     def get_pose_homogeneous(self, tag_id):
         return params_to_matrix(self.tag_poses[tag_id], type='quaternion')
 
-    def save_to_file(self, filename: Union[Path, str]):
-        if isinstance(filename, str):
-            filename = Path(filename)
-        np.save(filename, self.tag_poses)
+    def save_to_file(self, dir_name: Union[Path, str]):
+        if isinstance(dir_name, str):
+            dir_name = Path(dir_name)
+        if dir_name.is_dir():
+            filepath = dir_name / "tag_poses.npy"
+        elif dir_name.suffix == ".npy":
+            filepath = dir_name
+        else:
+            raise ValueError("Invalid file path. Must be an existing directory or a .npy file.")
+        print(f"Saving tag poses to {filepath}")
+        np.save(filepath, self.tag_poses)
 
     @classmethod
-    def load_from_file(cls, filename: Union[Path, str]):
-        if isinstance(filename, str):
-            filename = Path(filename)
+    def load_from_file(cls, dir_name: Union[Path, str]):
+        if isinstance(dir_name, str):
+            dir_name = Path(dir_name)
+        if dir_name.is_dir():
+            filename = dir_name / "tag_poses.npy"
+        else:
+            filename = dir_name
+        if not filename.exists():
+            raise FileNotFoundError(f"File {filename} does not exist.")
         tag_poses = np.load(filename, allow_pickle=True).item()
         tag_map = cls()
         tag_map.tag_poses = tag_poses

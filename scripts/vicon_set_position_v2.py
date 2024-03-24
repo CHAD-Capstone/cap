@@ -18,7 +18,11 @@ from geometry_msgs.msg import Quaternion
 from geometry_msgs.msg import Transform
 from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Bool
+
+from cap_srvs.srv import SetLocalizationMode, SetLocalizationModeResponse
+from cap_srvs.srv import IsReady, IsReadyResponse
 
 from cap_msgs.msg import TagTransformArray
 
@@ -30,6 +34,8 @@ class ViconPositionSetNode:
         node_name = 'vicon_set_position_{:02d}'.format(group_number)
         rospy.init_node(node_name)
         print("Starting VICON Node with name", node_name)
+        self.ready = False
+        self.ready_state = "Starting"
 
         # If pass_through is true then it is assumed that the realsense and VICON frames always coincide
         self.pass_through = pass_though
@@ -49,13 +55,17 @@ class ViconPositionSetNode:
         self.setpoint_publisher = rospy.Publisher('/mavros/setpoint_position/local', PoseStamped, queue_size=10)
 
         self.current_corrected_position = None  # P^VICON - The current corrected position in the VICON frame
+        self.current_corrected_velocity = None  # V^VICON - The current corrected velocity in the VICON frame
         # Publisher for the position that has been transformed from the local frame to the VICON frame
         self.corrected_position_pub = rospy.Publisher('/capdrone/local_position/pose', PoseStamped, queue_size=10)
+        self.corrected_velocity_pub = rospy.Publisher('/capdrone/local_position/velocity_local', TwistStamped, queue_size=10)
 
         # Drone Local Position Input
         self.current_uncorrected_position = None  # P^realsense - The current uncorrected position in the local frame
+        self.current_uncorrected_velocity = None  # V^realsense - The current uncorrected velocity in the local frame
         # Subscriber for the local position estimate from the realsense. This is the same as the uncurrected position.
         self.local_position_sub = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, callback=self.local_position_cb)
+        self.local_velocity_sub = rospy.Subscriber('/mavros/local_position/velocity_local', TwistStamped, callback=self.local_velocity_cb)
 
         # Setpoint Input
         # Subscriber for the desired position in the VICON frame. This is the position we want the drone to move to.
@@ -64,6 +74,10 @@ class ViconPositionSetNode:
 
         self.local_position_queue = TimestampQueue(max_length=queue_length)
 
+        # Service call to set the localization mode (VICON, APRILTAG, REALSENSE)
+        self.set_localization_mode_service = rospy.Service('/capdrone/set_localization_mode', SetLocalizationMode, self.set_localization_mode_cb)
+        self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
+
         # At the start, we assume that the VICON frame coincides with the local frame
         self.T_realsense_VICON = np.eye(4)
 
@@ -71,17 +85,58 @@ class ViconPositionSetNode:
 
         # If we are using VICON, we need to wait for the first VICON message before we can start
         if self.use_vicon:
+            self.ready_state = "Waiting for VICON"
             print("Waiting for VICON...")
             while not self.got_VICON and not rospy.is_shutdown():
                 rospy.sleep(0.1)
         
         # In every case we need to have at least one local position message before we can start
         print("Waiting for local position...")
+        self.ready_state = "Waiting for local position"
         while self.current_uncorrected_position is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
 
         print("Ready to set positions")
+        self.ready = True
+        self.ready_state = "Ready"
         rospy.spin()
+
+    def is_ready_cb(self, req):
+        return IsReadyResponse(self.ready, self.ready_state)
+
+    def set_localization_mode_cb(self, req):
+        """
+        Service callback for setting the localization mode
+        """
+        if req.data == "VICON":
+            # Verify that we are getting VICON data
+            if not self.got_VICON:
+                rospy.logwarn("Cannot set localization mode to VICON because we have not received any VICON data")
+                return SetLocalizationModeResponse(False)
+            rospy.loginfo("Setting localization mode to VICON")
+            if self.use_vicon:
+                return SetLocalizationModeResponse(True)
+            self.use_vicon = True
+            self.use_apriltag_loc = False
+            self.pass_through = False
+            return SetLocalizationModeResponse(True)
+        elif req.data == "APRILTAG":
+            rospy.loginfo("Setting localization mode to APRILTAG")
+            if self.use_apriltag_loc:
+                return SetLocalizationModeResponse(True)
+            self.use_vicon = False
+            self.use_apriltag_loc = True
+            self.pass_through = False
+            return SetLocalizationModeResponse(True)
+        elif req.data == "REALSENSE":
+            rospy.loginfo("Setting localization mode to REALSENSE")
+            self.use_vicon = False
+            self.use_apriltag_loc = False
+            self.pass_through = True
+            return SetLocalizationModeResponse(True)
+        else:
+            rospy.logwarn(f"Invalid localization mode: {req.data}")
+            return SetLocalizationModeResponse(False)
 
     def set_desired_position_local_cb(self, msg):
         """
@@ -152,6 +207,43 @@ class ViconPositionSetNode:
         self.local_position_queue.enqueue(msg.header.stamp.to_sec(), msg)
         self.current_uncorrected_position = msg
         self.update_corrected_position()
+
+    def update_corrected_velocity(self):
+        """
+        Uses the current uncorrected velocity and the current transformation matrix to update the corrected velocity
+        and publishes it
+        """
+        if self.current_uncorrected_velocity is None:
+            return
+        if self.pass_through:
+            # Then our corrected velocity is the same as the uncorrected velocity
+            self.corrected_velocity_pub.publish(self.current_uncorrected_velocity)
+            self.current_corrected_velocity = self.current_uncorrected_velocity
+        else:
+            # Then we need to project this velocity into the VICON frame
+            current_header = self.current_uncorrected_velocity.header
+            # Get the transform from the local frame to the VICON frame
+            T_VICON_realsense = np.linalg.inv(self.T_realsense_VICON)
+
+            twist = self.current_uncorrected_velocity.twist
+            linear_velocity = np.array([twist.linear.x, twist.linear.y, twist.linear.z])
+            angular_velocity = np.array([twist.angular.x, twist.angular.y, twist.angular.z])
+
+            R = T_VICON_realsense[:3, :3]
+            corrected_linear_velocity = R @ linear_velocity
+            corrected_angular_velocity = R @ angular_velocity
+
+            corrected_twist = TwistStamped()
+            corrected_twist.header = current_header
+            corrected_twist.twist.linear = Vector3(*corrected_linear_velocity)
+            corrected_twist.twist.angular = Vector3(*corrected_angular_velocity)
+
+            self.corrected_velocity_pub.publish(corrected_twist)
+            self.current_corrected_velocity = corrected_twist
+
+    def local_velocity_cb(self, msg):
+        self.current_uncorrected_velocity = msg
+        self.update_corrected_velocity()
 
     def vicon_cb(self, msg):
         if self.use_vicon:
