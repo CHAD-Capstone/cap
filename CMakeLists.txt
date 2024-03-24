@@ -61,6 +61,7 @@ add_service_files(
   IsReady.srv
   SetLocalizationMode.srv
   NewTag.srv
+  TagPoses.srv
 )
 
 ## Generate actions in the 'action' folder

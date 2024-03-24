@@ -7,8 +7,10 @@ import numpy as np
 from pathlib import Path
 import shutil
 import datetime
+import json
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap
+from cap.transformation_lib import params_to_matrix
 
 file_dir = Path(__file__).resolve().parent
 cap_pkg_dir = file_dir.parent.parent
@@ -19,6 +21,7 @@ DATA_DIR = cap_pkg_dir / "data"
 FINAL_CALIBRATION_DIR = DATA_DIR / "final_calibration"
 FLIGHT_DATA_DIR = DATA_DIR / "flight_data"
 FLIGHT_DATA_ARCHIVE_DIR = DATA_DIR / "flight_data_archive"
+FLIGHT_INPUTS_DIR = DATA_DIR / "flight_inputs"
 
 def load_final_intrinsics_calibration():
     """
@@ -79,6 +82,33 @@ def load_current_flight_tag_map():
     """
     tag_map = AprilTagMap.load_from_file(FLIGHT_DATA_DIR)
     return tag_map
+
+def load_approximate_tag_poses():
+    """
+    The approximate tag poses are stored in a JSON file at
+    FLIGHT_INPUTS_DIR / "approximate_tag_poses.json"
+
+    A tag pose is a dictionary structured as follows:
+    [{
+        "id": 2,
+        "position": [0, 0, 0],
+        "rotation": [0, 0, 0]
+    }, ...]
+    where the rotation is roll, pitch, yaw in radians
+    """
+    tag_poses_file = FLIGHT_INPUTS_DIR / "approximate_tag_poses.json"
+    with open(tag_poses_file, 'r') as f:
+        tag_poses = json.load(f)
+    # Convert the tag poses into an AprilTagMap object
+    tag_map = AprilTagMap()
+    for tag_pose in tag_poses:
+        position = np.array(tag_pose["position"])
+        rotation = np.array(tag_pose["rotation"])
+        params = np.concatenate((position, rotation))
+        homog_matrix = params_to_matrix(params)
+        tag_map.add_tag_pose(tag_pose["id"], homog_matrix)
+    return tag_map
+
 
 if __name__ == "__main__":
     # Archive existing flight data

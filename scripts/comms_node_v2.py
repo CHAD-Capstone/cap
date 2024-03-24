@@ -12,7 +12,7 @@ from cap.data_lib import archive_existing_current_flight_data, load_current_flig
 from cap_srvs.srv import IsReady, IsReadyResponse
 from cap_srvs.srv import SetLocalizationMode, SetLocalizationModeResponse
 from cap_srvs.srv import NewTag, NewTagResponse
-from cap_srvs.srv import ApproximateTagPoses, ApproximateTagPosesResponse
+from cap_srvs.srv import TagPoses, TagPoses
 from std_srvs.srv import Empty, EmptyResponse
 from mavros_msgs.srv import CommandBool, SetMode
 
@@ -70,7 +70,7 @@ class CommsNode:
         self.srv_abort = rospy.Service(node_name + '/comm/abort', Empty, self.callback_abort)
 
         # Service to begin mapping
-        self.src_begin_mapping = rospy.Service(node_name + '/comm/begin_mapping', ApproximateTagPoses, self.callback_begin_mapping)
+        self.src_begin_mapping = rospy.Service(node_name + '/comm/begin_mapping', TagPoses, self.callback_begin_mapping)
         # Service to begin inspecting
         self.src_begin_inspecting = rospy.Service(node_name + '/comm/begin_inspecting', Empty, self.callback_begin_inspecting)
 

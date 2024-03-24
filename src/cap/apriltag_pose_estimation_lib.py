@@ -30,6 +30,9 @@ class AprilTagMap:
     def __init__(self):
         self.tag_poses = {}  # Maps from tag_id to pose
 
+    def tag_ids(self):
+        return sorted(list(self.tag_poses.keys()))
+
     def add_tag_pose(self, tag_id, pose):
         if tag_id in self.tag_poses:
             print(f"Tag with id {tag_id} already exists. Overwriting the pose.")
