@@ -204,7 +204,8 @@ class CommsNode:
         # We can only set the position in IDLE mode
         res = SetPositionResponse()
         if self.comms_mode == CommsMode.IDLE:
-            success = self.move_and_wait(request.x, request.y, request.z, lambda : False, settle_time=1)
+            position = (request.x, request.y, request.z)
+            success = self.move_and_wait(lambda : False, position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to requested position")
                 res.success = False
@@ -238,7 +239,7 @@ class CommsNode:
         # We can only stop inspecting in INSPECTING mode
         if self.comms_mode == CommsMode.INSPECTING:
             self.set_comms_mode(CommsMode.IDLE)  # This should cause us to drop out of the inspecting loop
-            self.move_and_wait(*self.home_position, lambda : False, settle_time=1)
+            self.move_and_wait(lambda : False, self.home_position, velocity_threshold=0.1)
         else:
             rospy.logwarn(f"Stop inspecting requested while not in INSPECTING mode. Current mode: {self.comms_mode}")
         return EmptyResponse()
@@ -311,7 +312,7 @@ class CommsNode:
         while tag_idx < len(tag_ids) and not self.should_exit_mapping():
             tag_id = tag_ids[tag_idx]
             flight_position = positions[tag_idx]
-            success = self.move_and_wait(*flight_position, self.should_exit_mapping, settle_time=1)
+            success = self.move_and_wait(self.should_exit_mapping, flight_position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to tag position")
                 break
@@ -329,7 +330,7 @@ class CommsNode:
             tag_position = tag_pose_VICON[:3, 3].copy()
             tag_position[2] += self.mapping_height
 
-            success = self.move_and_wait(*tag_position, self.should_exit_mapping, settle_time=1)
+            success = self.move_and_wait(self.should_exit_mapping, tag_position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to corrected tag position")
                 break
@@ -343,7 +344,7 @@ class CommsNode:
             capture_failed = False
             for offset in self.mapping_imaging_offsets:
                 offset_position = tag_position + offset
-                success = self.move_and_wait(*offset_position, self.should_exit_mapping, settle_time=1)
+                success = self.move_and_wait(self.should_exit_mapping, offset_position, velocity_threshold=0.1)
                 if not success:
                     rospy.logerr("Failed to move to image offset position")
                     capture_failed = True
@@ -359,7 +360,7 @@ class CommsNode:
             tag_idx += 1
 
         # Fly home
-        success = self.move_and_wait(*self.home_position, self.should_exit_mapping, settle_time=1)
+        success = self.move_and_wait(self.should_exit_mapping, self.home_position, velocity_threshold=0.1)
         if not success:
             rospy.logerr("Failed to move home")
         self.set_comms_mode(CommsMode.IDLE)
@@ -402,7 +403,7 @@ class CommsNode:
         while tag_idx < len(tag_ids) and not self.should_exit_inspecting():
             tag_id = tag_ids[tag_idx]
             flight_position = positions[tag_idx]
-            success = self.move_and_wait(*flight_position, self.should_exit_inspecting, settle_time=1)
+            success = self.move_and_wait(self.should_exit_inspecting, flight_position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to tag position")
                 break
@@ -427,18 +428,39 @@ class CommsNode:
         velocity = self.current_velocity_VICON.twist.linear
         return (abs(velocity.x) < threshold) and (abs(velocity.y) < threshold) and (abs(velocity.z) < threshold)
 
-    def move_and_wait(self, x: float, y: float, z: float, should_exit_function, tolerance: float = 0.1, settle_time: float = 0.5):
+    def move_and_wait(
+        self,
+        should_exit_function,
+        position: Tuple[float, float, float],
+        orientation: Tuple[float, float, float, float] = None,
+        position_tolerance: float = 0.1,  # Must be closer than this to the target position
+        velocity_threshold: float = None,  # Must be moving slower than this to be considered at the target position
+        settle_time: float = None  # Wait time after reaching the target position and velocity is below threshold
+    ):
         """
         Begins moving to the given position and waits until the drone is at the position or should exit
 
         Returns True if the drone reached the position, False if the function should exit
         """
-        self.move_to(x, y, z)
-        while not self.is_at_position(x, y, z, tolerance) and not should_exit_function() and not rospy.is_shutdown() and self.in_offboard():
+        x, y, z = position
+        if orientation is None:
+            orientation = (0, 0, 0, 1)
+        qx, qy, qz, qw = orientation
+        self.move_to(x, y, z, qx=qx, qy=qy, qz=qz, qw=qw)
+        is_at_postion = self.wait_until_at_position(x, y, z, position_tolerance, should_exit_function, settle_time)
+        is_below_velocity = velocity_threshold is None or self.is_velocity_below_threshold(velocity_threshold)
+        while is_at_postion and is_below_velocity and not should_exit_function() and not rospy.is_shutdown() and self.in_offboard():
             rospy.sleep(0.1)
-        if not self.is_at_position(x, y, z, tolerance):
+            is_at_postion = self.is_at_position(x, y, z, position_tolerance)
+            is_below_velocity = velocity_threshold is None or self.is_velocity_below_threshold(velocity_threshold)
+        if not is_at_postion:
+            rospy.logerr("Failed to reach target position")
             return False
-        rospy.sleep(settle_time)
+        if not is_below_velocity:
+            rospy.logerr("Failed to reach target velocity")
+            return False
+        if settle_time is not None:
+            rospy.sleep(settle_time)
         return True
 
     ##### High Level Control Functions #####
