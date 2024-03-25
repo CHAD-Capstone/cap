@@ -5,6 +5,8 @@ It interacts with the comms node via service calls to instruct the drone to take
 """
 
 from threading import Thread
+import json
+
 import rospy
 from std_srvs.srv import Empty
 from cap_srvs.srv import TagPoses
@@ -13,6 +15,7 @@ from cap_msgs.msg import TagTransform
 from geometry_msgs.msg import TransformStamped
 
 from cap.data_lib import load_approximate_tag_poses
+from cap.data_lib import FLIGHT_INPUTS_DIR
 
 class GroundStationNode:
     def __init__(self, group_id: int = 6):
@@ -57,6 +60,8 @@ class GroundStationNode:
                 self.abort()
             elif command == 's':
                 self.set_position(*args)
+            elif command == 'p':
+                self.run_position_test()
             elif command == 'm':
                 self.begin_mapping()
             elif command == 'i':
@@ -90,13 +95,35 @@ class GroundStationNode:
         if len(position) != 3 or position[2] < 0.5:
             print("Invalid position")
             return
-        res = self.set_position_client(position)
+        msg = SetPosition()
+        msg.position = position
+        res = self.set_position_client(msg)
         suc = res.success
         msg = res.message
         if suc:
             print("Successfully set position")
         else:
             print(f"Failed to set position: {msg}")
+
+    def run_position_test(self):
+        # Load the json file 
+        test_flight_data_file = FLIGHT_INPUTS_DIR / "test_flight.json"
+        with open(test_flight_data_file, 'r') as f:
+            test_flight_data = json.load(f)
+        for pose in test_flight_data:
+            position = pose["position"]
+            msg = SetPosition()
+            msg.position = position
+            res = self.set_position_client(msg)
+            suc = res.success
+            msg = res.message
+            if suc:
+                print(f"Successfully set position: {position}")
+            else:
+                print(f"Failed to set position: {position}")
+                return False
+            rospy.sleep(1)
+        return True
 
     def begin_mapping(self):
         approximate_tag_map = load_approximate_tag_poses()
