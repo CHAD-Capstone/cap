@@ -10,6 +10,7 @@ import rospy
 import threading
 from enum import Enum
 import numpy as np
+from typing import Tuple
 
 # Cap libraries
 from cap.data_lib import archive_existing_current_flight_data, load_current_flight_tag_map
@@ -18,14 +19,15 @@ from cap.apriltag_pose_estimation_lib import AprilTagMap
 from cap.transformation_lib import pose_stamped_to_matrix, transform_stamped_to_matrix
 
 # Service messages
-from cap_srvs.srv import IsReady, IsReadyResponse
-from cap_srvs.srv import SetLocalizationMode, SetLocalizationModeResponse
-from cap_srvs.srv import NewTag, NewTagResponse
-from cap_srvs.srv import TagPoses, TagPosesResponse
-from cap_srvs.srv import FindTag, FindTagResponse
-from cap_srvs.srv import SetPosition, SetPositionResponse
+from cap.srv import IsReady, IsReadyResponse
+from cap.srv import SetLocalizationMode, SetLocalizationModeResponse
+from cap.srv import NewTag, NewTagResponse
+from cap.srv import TagPoses, TagPosesResponse
+from cap.srv import FindTag, FindTagResponse
+from cap.srv import SetPosition, SetPositionResponse
 from std_srvs.srv import Empty, EmptyResponse
-from mavros_msgs.srv import CommandBool, SetMode
+from std_msgs.msg import Bool, String
+from mavros_msgs.srv import CommandBool, SetMode, SetModeRequest, CommandBoolRequest
 
 # Message types
 from mavros_msgs.msg import State
@@ -47,7 +49,7 @@ class CommsNode:
         takeoff_altitude_m: float = 1.5,
         archive_previous_flight_data: bool = False,
     ):
-        node_name = f'rob498_drone_{group_number:02d}'
+        node_name = f'rob498_drone_{group_id:02d}'
         rospy.init_node(node_name)
 
         self.home_position = (0, 0, takeoff_altitude_m)
@@ -68,15 +70,17 @@ class CommsNode:
         # Wait for other nodes to be ready
         self.ready_services = [
             "/capdrone/vicon_set_position/ready",  # The vicon_set_position node
-            "/capdrone/apriltag_mapping/ready",  # The apriltag_mapping node
-            "/capdrone/apriltag_localization/ready",  # The apriltag_localization node
+            # "/capdrone/apriltag_mapping/ready",  # The apriltag_mapping node
+            # "/capdrone/apriltag_localization/ready",  # The apriltag_localization node
         ]
         for service_name in self.ready_services:
             self.wait_for_service_ready(service_name)
 
         self.comms_mode = CommsMode.NON_OFFBOARD
+        self.offboard_thread = None
 
         ##### Service Servers #####
+        print("Setting up service servers")
         self.srv_ping = rospy.Service(node_name + '/comm/ping', Empty, self.callback_ping)
         self.srv_launch = rospy.Service(node_name + '/comm/launch', Empty, self.callback_launch)
         self.srv_land = rospy.Service(node_name + '/comm/land', Empty, self.callback_land)
@@ -102,6 +106,7 @@ class CommsNode:
         self.src_stop_inspecting = rospy.Service(node_name + '/comm/stop_inspecting', Empty, self.callback_stop_inspecting)
 
         #### Service Clients ####
+        print("Setting up service clients")
         ## VICON Set Position Services
         # Sets the drone to use a different estimate for its global position
         self.srv_set_localization_mode = rospy.ServiceProxy("/capdrone/set_localization_mode", SetLocalizationMode)
@@ -122,6 +127,7 @@ class CommsNode:
         self.srv_apriltag_localization_refresh_tag_map = rospy.ServiceProxy("/capdrone/apriltag_localization/refresh_tag_locations", Empty)
 
         ##### State Management #####
+        print("Setting up state subscribers")
         # Keep track of the current state so we can tell what mode we are in
         self.current_state: State = None
         state_sub = rospy.Subscriber("/mavros/state", State, callback = self.state_cb)
@@ -142,11 +148,13 @@ class CommsNode:
         print(f"Waiting for service {service_name} to return ready")
         rospy.wait_for_service(service_name)
         service = rospy.ServiceProxy(service_name, IsReady)
-        response = service(IsReadyRequest())
+        msg = IsReady()
+        response = service()
         while not response.ready:
             print(f"Service {service_name} not ready: {response.message}")
             rospy.sleep(1)
-            response = service(IsReadyRequest())
+            response = service()
+        print(f"{service_name} returned ready")
         return response
 
     ##### Mode Transition Functions #####
@@ -180,9 +188,11 @@ class CommsNode:
 
     ##### Service Callbacks #####
     def callback_ping(self, request):
+        print("Got ping")
         return EmptyResponse()
 
     def callback_launch(self, request):
+        print("Got Launch")
         if self.comms_mode == CommsMode.NON_OFFBOARD:
             self.launch()
         else:
@@ -191,32 +201,32 @@ class CommsNode:
         return EmptyResponse()
 
     def callback_land(self, request):
+        print("Got Land")
         # We are allowed to land in any mode
         self.land()
         return EmptyResponse()
 
     def callback_abort(self, request):
+        print("Got Abort")
         # We are allowed to abort in any mode
         self.abort()
         return EmptyResponse()
 
     def callback_set_position(self, request):
+        position = request.position
+        print(f"Got set position {(position.x, position.y, position.z)}")
         # We can only set the position in IDLE mode
-        res = SetPositionResponse()
         if self.comms_mode == CommsMode.IDLE:
-            position = (request.x, request.y, request.z)
+            position = (position.x, position.y, position.z)
             success = self.move_and_wait(lambda : False, position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to requested position")
-                res.success = False
-                res.message = "Failed to move to requested position"
+                return Bool(False), String("Failed to move to requested position")
             else:
-                res.success = True
-                res.message = "Moved to requested position"
+                return Bool(True), String("Moved to requested position")
         else:
             rospy.logwarn(f"Set position requested while not in IDLE mode. Current mode: {self.comms_mode}")
-            res.success = False
-            res.message = "Not in IDLE mode"
+            return Bool(False), String("Not in IDLE mode")
         return res
 
     def callback_begin_mapping(self, request):
@@ -417,7 +427,11 @@ class CommsNode:
         if self.current_pose_VICON is None:
             return False
         pose = self.current_pose_VICON.pose.position
-        return (abs(pose.x - x) < tolerance) and (abs(pose.y - y) < tolerance) and (abs(pose.z - z) < tolerance)
+        x_dist = abs(pose.x - x)
+        y_dist = abs(pose.y - y)
+        z_dist = abs(pose.z - z)
+        print(f"Distances: {(x_dist, y_dist, z_dist)}. {(x_dist < tolerance) and (y_dist < tolerance) and (z_dist < tolerance)}")
+        return (x_dist < tolerance) and (y_dist < tolerance) and (z_dist < tolerance)
 
     def is_velocity_below_threshold(self, threshold: float = 0.1):
         """
@@ -426,6 +440,7 @@ class CommsNode:
         if self.current_velocity_VICON is None:
             return False
         velocity = self.current_velocity_VICON.twist.linear
+        print(f"Velocities: {(abs(velocity.x), abs(velocity.y), abs(velocity.z))}")
         return (abs(velocity.x) < threshold) and (abs(velocity.y) < threshold) and (abs(velocity.z) < threshold)
 
     def move_and_wait(
@@ -442,6 +457,7 @@ class CommsNode:
 
         Returns True if the drone reached the position, False if the function should exit
         """
+        print(f"Moving to {position}")
         x, y, z = position
         if orientation is None:
             orientation = (0, 0, 0, 1)
@@ -449,6 +465,7 @@ class CommsNode:
         self.move_to(x, y, z, qx=qx, qy=qy, qz=qz, qw=qw)
         is_at_postion = self.wait_until_at_position(x, y, z, position_tolerance, should_exit_function, settle_time)
         is_below_velocity = velocity_threshold is None or self.is_velocity_below_threshold(velocity_threshold)
+        print("Waiting to get to position")
         while is_at_postion and is_below_velocity and not should_exit_function() and not rospy.is_shutdown() and self.in_offboard():
             rospy.sleep(0.1)
             is_at_postion = self.is_at_position(x, y, z, position_tolerance)
@@ -461,12 +478,17 @@ class CommsNode:
             return False
         if settle_time is not None:
             rospy.sleep(settle_time)
+        print("Got to position")
         return True
+
+    def is_in_mode(self, mode):
+        return self.current_state.mode == mode
 
     ##### High Level Control Functions #####
     def launch(self):
         self.set_comms_mode(CommsMode.BUSY)
 
+        print("Launching")
         self.move_to(*self.home_position)  # Start publishing early so we don't drop out of offboard mode
         rospy.sleep(1)
         offboard = self.start_offboard_mode()
@@ -488,6 +510,7 @@ class CommsNode:
         rospy.loginfo("Waiting for drone to reach home position")
         while (not self.is_at_position(*self.home_position) or not self.is_velocity_below_threshold()) and not rospy.is_shutdown():
             rospy.sleep(1)
+        print("Home!")
 
         rospy.loginfo("Drone is ready to take commands")
         self.set_comms_mode(CommsMode.IDLE)
@@ -497,6 +520,9 @@ class CommsNode:
         """
         Lands the drone
         """
+        if self.offboard_thread is None:
+            rospy.logwarn("Tried to land when not in control")
+            return False
         self.set_comms_mode(CommsMode.BUSY)
 
         self.stop_offboard_mode()
@@ -507,6 +533,14 @@ class CommsNode:
 
         # No need to set comms mode because stop_offboard_mode will do that
         return True
+
+    def abort(self):
+        """
+        Aborts the current operation and lands the drone
+        """
+        self.comms_mode = CommsMode.ABORT
+        self.disarm()
+        self.stop_offboard_mode()
 
     ##### Low Level Control Functions #####
     def set_mode(self, custom_mode):
@@ -605,4 +639,5 @@ if __name__ == "__main__":
         takeoff_altitude_m=1,
         archive_previous_flight_data=False
     )
+    print("Spinning")
     rospy.spin()

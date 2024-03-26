@@ -9,20 +9,21 @@ import json
 
 import rospy
 from std_srvs.srv import Empty
-from cap_srvs.srv import TagPoses
-from cap_srvs.srv import SetPosition
-from cap_msgs.msg import TagTransform
-from geometry_msgs.msg import TransformStamped
+from cap.srv import TagPoses
+from cap.srv import SetPosition
+from cap.msg import TagTransform
+from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
 
+from cap.transformation_lib import matrix_to_params
 from cap.data_lib import load_approximate_tag_poses
 from cap.data_lib import FLIGHT_INPUTS_DIR
 
 class GroundStationNode:
     def __init__(self, group_id: int = 6):
-        node_name = f'ground_station_{group_number:02d}'
+        node_name = f'ground_station_{group_id:02d}'
         rospy.init_node(node_name)
 
-        comms_node_name = f'rob498_drone_{group_number:02d}'
+        comms_node_name = f'rob498_drone_{group_id:02d}'
 
         # Define the service clients
         rospy.wait_for_service(f'{comms_node_name}/comm/ping')
@@ -76,6 +77,8 @@ class GroundStationNode:
             if command == 's':
                 position = input("Enter position (x y z): ")
                 position = [float(coord) for coord in position.split()]
+            else:
+                position = None
             Thread(target=execute_command, args=(command, position), daemon=True).start()
 
     def ping(self):
@@ -95,9 +98,9 @@ class GroundStationNode:
         if len(position) != 3 or position[2] < 0.5:
             print("Invalid position")
             return
-        msg = SetPosition()
-        msg.position = position
-        res = self.set_position_client(msg)
+        position = Vector3(*position)
+        orientation = Quaternion(*(0, 0, 0, 1))
+        res = self.set_position_client(position, orientation)
         suc = res.success
         msg = res.message
         if suc:
@@ -127,15 +130,13 @@ class GroundStationNode:
 
     def begin_mapping(self):
         approximate_tag_map = load_approximate_tag_poses()
-        tag_poses = TagPoses()
         tags = []
         for tag_id in approximate_tag_map.tag_ids():
-            tag_pose = approximate_tag_map.get_tag_pose(tag_id)
+            tag_params = approximate_tag_map.get_pose(tag_id)
             tag = TransformStamped()
             tag.header.frame_id = "map"
             tag.child_frame_id = f"tag_{tag_id}"
             
-            tag_params = matrix_to_params(tag_pose, type='quaternion')
             position = tag_params[:3]
             rotation = tag_params[3:]
             tag.transform.translation.x = position[0]
@@ -151,8 +152,8 @@ class GroundStationNode:
             tag_transform.transform = tag
 
             tags.append(tag_transform)
-        tag_poses.tags = tags
-        self.begin_mapping_client(tag_poses)
+        print(f"Sending mapping message: {tags}")
+        self.begin_mapping_client(tags)
 
     def begin_inspecting(self):
         self.begin_inspecting_client()

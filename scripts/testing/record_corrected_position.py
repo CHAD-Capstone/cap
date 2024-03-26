@@ -17,11 +17,12 @@ Output Files:
 flight_data.npy - This is the data that will be used for visualization.
 """
 
+import rospy
+
 from pathlib import Path
 from geometry_msgs.msg import TransformStamped, PoseStamped
 import numpy as np
 
-from cap.apriltag_pose_estimation_lib import load_apriltag_map
 from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params
 from cap.data_lib import FLIGHT_DATA_DIR
 
@@ -30,7 +31,7 @@ cap_pkg_dir = file_dir.parent.parent
 assert (cap_pkg_dir / "CMakeLists.txt").exists(), f"cap_pkg_dir: {cap_pkg_dir} does not appear to be the root of the cap package."
 
 class RecordCorrectedPositionNode:
-    def __init__(group_number, flight_data_file: Path):
+    def __init__(self, group_number, flight_data_file: Path):
         node_name = 'record_corrected_position_{:02d}'.format(group_number)
         rospy.init_node(node_name)
         print("Starting Record Corrected Position Node with name", node_name)
@@ -85,6 +86,7 @@ class RecordCorrectedPositionNode:
         self.flight_data['corrected_position'].append((current_time_sec, pose_params))
 
     def save_data(self):
+        rospy.loginfo(f"Saving data: ({len(self.flight_data['setpoint_position_local'])}, {len(self.flight_data['vicon'])}, {len(self.flight_data['local_position'])}, {len(self.flight_data['corrected_position'])})")
         np.save(self.flight_data_file, self.flight_data)
 
     def run(self):

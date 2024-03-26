@@ -1,5 +1,5 @@
 # Request
-string data
+std_msgs/String data
 ---
 # Response
-bool success
+std_msgs/Bool success

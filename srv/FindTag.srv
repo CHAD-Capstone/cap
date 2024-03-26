@@ -1,4 +1,4 @@
-int tag_id
+std_msgs/Int64 tag_id
 ---
-bool found
+std_msgs/Bool found
 geometry_msgs/TransformStamped transform

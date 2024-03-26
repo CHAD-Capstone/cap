@@ -54,9 +54,11 @@ class TimestampQueue:
         return None
 
     def search(self, timestamp):
+        if len(self.queue) == 0:
+            return None
         index = bisect.bisect_left(self.queue, timestamp)
         if index == len(self.queue):
-            return [self.queue[-1]]
+            return [self.queue[len(self.queue) - 1]]
         if index == 0:
             if self.queue[0].timestamp == timestamp:
                 return [self.queue[0]]

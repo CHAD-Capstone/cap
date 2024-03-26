@@ -21,10 +21,10 @@ from geometry_msgs.msg import Vector3
 from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Bool
 
-from cap_srvs.srv import SetLocalizationMode, SetLocalizationModeResponse
-from cap_srvs.srv import IsReady, IsReadyResponse
+from cap.srv import SetLocalizationMode, SetLocalizationModeResponse
+from cap.srv import IsReady, IsReadyResponse
 
-from cap_msgs.msg import TagTransformArray
+from cap.msg import TagTransformArray
 
 from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped
 from cap.timestamp_queue import TimestampQueue
@@ -33,6 +33,7 @@ class ViconPositionSetNode:
     def __init__(self, group_number, pass_though, use_vicon, use_apriltag_loc, queue_length=100):
         node_name = 'vicon_set_position_{:02d}'.format(group_number)
         rospy.init_node(node_name)
+        self.local_position_queue = TimestampQueue(max_length=queue_length)
         print("Starting VICON Node with name", node_name)
         self.ready = False
         self.ready_state = "Starting"
@@ -72,8 +73,6 @@ class ViconPositionSetNode:
         self.capdrone_set_position_local_sub = rospy.Subscriber('/capdrone/setpoint_position/local', PoseStamped, callback=self.set_desired_position_local_cb)
         self.current_desired_corrected_pose = None
 
-        self.local_position_queue = TimestampQueue(max_length=queue_length)
-
         # Service call to set the localization mode (VICON, APRILTAG, REALSENSE)
         self.set_localization_mode_service = rospy.Service('/capdrone/set_localization_mode', SetLocalizationMode, self.set_localization_mode_cb)
         self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
@@ -89,12 +88,14 @@ class ViconPositionSetNode:
             print("Waiting for VICON...")
             while not self.got_VICON and not rospy.is_shutdown():
                 rospy.sleep(0.1)
+            print("Got VICON")
         
         # In every case we need to have at least one local position message before we can start
         print("Waiting for local position...")
         self.ready_state = "Waiting for local position"
         while self.current_uncorrected_position is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
+        print("Got local position")
 
         print("Ready to set positions")
         self.ready = True
@@ -142,6 +143,9 @@ class ViconPositionSetNode:
         """
         Callback for the setpoint position subscriber
         """
+        print(f"Setting desired local position {msg}")
+        if not self.ready:
+            rospy.logwarn("Ignoring set position due to not ready")
         self.current_desired_corrected_pose = msg
         # Now we project the desired position from the VICON frame into the local frame
         # Transform the desired pose in a matrix. This matrix can be though of as T_VICON_desired
@@ -160,6 +164,9 @@ class ViconPositionSetNode:
         T_VICON_marker = transform_stamped_to_matrix(vicon_transform)
         # We get the corresponding local position by searching in the local position queue for the closest timestamp
         local_position_elems = self.local_position_queue.search(vicon_timestamp)
+        if local_position_elems is None:
+            # Then the queue was empty
+            return False
         if len(local_position_elems) == 1:
             local_position = pose_stamped_to_matrix(local_position_elems[0].data)
         else:
@@ -176,12 +183,15 @@ class ViconPositionSetNode:
         T_realsense_VICON = local_position @ np.linalg.inv(T_VICON_marker)
         self.T_realsense_VICON = T_realsense_VICON
         self.update_corrected_position()
+        return True
 
     def update_corrected_position(self):
         """
         Uses the current uncorrected position and the current transformation matrix to update the corrected position
         and publishes it
         """
+        if not self.ready:
+            rospy.logwarn("Ignoring corrected position update due to not ready")
         if self.current_uncorrected_position is None:
             return
         if self.pass_through:
@@ -249,8 +259,7 @@ class ViconPositionSetNode:
         if self.use_vicon:
             # vicon_timestamp = msg.header.stamp.to_sec()
             vicon_timestamp = rospy.get_time()  # The VICON timestamp is misaligned with our local ros time
-            vicon_transform = msg.transform
-            self.update_transform(vicon_timestamp, vicon_transform)
+            self.update_transform(vicon_timestamp, msg)
             self.got_VICON = True
 
     def apriltag_localization_cb(self, msg):

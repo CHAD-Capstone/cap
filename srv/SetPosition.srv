@@ -1,5 +1,5 @@
 geometry_msgs/Vector3 position
 geometry_msgs/Quaternion orientation
 ---
-bool success
-string message
+std_msgs/Bool success
+std_msgs/String message

@@ -1,2 +1,2 @@
-int tag_id
+std_msgs/Int64 tag_id
 ---
