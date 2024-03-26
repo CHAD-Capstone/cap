@@ -430,7 +430,7 @@ class CommsNode:
         x_dist = abs(pose.x - x)
         y_dist = abs(pose.y - y)
         z_dist = abs(pose.z - z)
-        print(f"Distances: {(x_dist, y_dist, z_dist)}. {(x_dist < tolerance) and (y_dist < tolerance) and (z_dist < tolerance)}")
+        print(f"Distances: {(x_dist, y_dist, z_dist)}. {tolerance} - {((x_dist < tolerance), (y_dist < tolerance), (z_dist < tolerance))}")
         return (x_dist < tolerance) and (y_dist < tolerance) and (z_dist < tolerance)
 
     def is_velocity_below_threshold(self, threshold: float = 0.1):
@@ -440,7 +440,7 @@ class CommsNode:
         if self.current_velocity_VICON is None:
             return False
         velocity = self.current_velocity_VICON.twist.linear
-        print(f"Velocities: {(abs(velocity.x), abs(velocity.y), abs(velocity.z))}")
+        print(f"Velocities: {(abs(velocity.x), abs(velocity.y), abs(velocity.z))}. {threshold} - {((abs(velocity.x) < threshold), (abs(velocity.y) < threshold), (abs(velocity.z) < threshold))}")
         return (abs(velocity.x) < threshold) and (abs(velocity.y) < threshold) and (abs(velocity.z) < threshold)
 
     def move_and_wait(
@@ -508,8 +508,13 @@ class CommsNode:
 
         # Wait until we are at the home position and not moving
         rospy.loginfo("Waiting for drone to reach home position")
-        while (not self.is_at_position(*self.home_position) or not self.is_velocity_below_threshold()) and not rospy.is_shutdown():
+        is_at_position = self.is_at_position(*self.home_position, tolerance=0.2)
+        is_at_rest = self.is_velocity_below_threshold(threshold=10)
+        while (not is_at_position or not is_at_rest) and not rospy.is_shutdown():
             rospy.sleep(1)
+            is_at_position = self.is_at_position(*self.home_position, tolerance=0.2)
+            is_at_rest = self.is_velocity_below_threshold(threshold=10)
+            print(f"As at position {is_at_position}. Is at rest {is_at_position}")
         print("Home!")
 
         rospy.loginfo("Drone is ready to take commands")
