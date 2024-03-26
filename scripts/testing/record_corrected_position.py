@@ -19,24 +19,21 @@ flight_data.npy - This is the data that will be used for visualization.
 
 from pathlib import Path
 from geometry_msgs.msg import TransformStamped, PoseStamped
+import numpy as np
 
 from cap.apriltag_pose_estimation_lib import load_apriltag_map
 from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params
+from cap.data_lib import FLIGHT_DATA_DIR
 
 file_dir = Path(__file__).resolve().parent
 cap_pkg_dir = file_dir.parent.parent
 assert (cap_pkg_dir / "CMakeLists.txt").exists(), f"cap_pkg_dir: {cap_pkg_dir} does not appear to be the root of the cap package."
 
 class RecordCorrectedPositionNode:
-    def __init__(group_number, apriltag_map_file: Path, flight_data_file: Path):
+    def __init__(group_number, flight_data_file: Path):
         node_name = 'record_corrected_position_{:02d}'.format(group_number)
         rospy.init_node(node_name)
         print("Starting Record Corrected Position Node with name", node_name)
-
-        # Make sure the input files exist
-        if not apriltag_map_file.exists():
-            raise FileNotFoundError(f"Could not load apriltag map file: {apriltag_map_file}")
-        self.apriltag_map = load_apriltag_map(apriltag_map_file)
 
         # Make sure the output folder exists
         flight_data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +98,7 @@ class RecordCorrectedPositionNode:
 
 if __name__ == "__main__":
     group_number = 6
-    apriltag_map_file = cap_pkg_dir / "data" / "flight_data" / "apriltag_map.npy"
-    flight_data_file = cap_pkg_dir / "data" / "flight_data" / f"flight_data.npy"
-    node = RecordCorrectedPositionNode(group_number, apriltag_map_file, flight_data_file)
+    FLIGHT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    flight_data_file = FLIGHT_DATA_DIR / f"flight_data.npy"
+    node = RecordCorrectedPositionNode(group_number, flight_data_file)
     node.run()
