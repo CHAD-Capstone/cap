@@ -59,6 +59,7 @@ def confirm_non_black_img(camera, black_threshold=10):
     """
     Takes a photo with the camera
     If the maximum pixel value is below the threshold, the image is considered black
+    NOTE: THIS DOES NOT WORK. When the camera is blocked it returns random colors, not black.
     """
     img = camera.read()
     return img.max() > black_threshold

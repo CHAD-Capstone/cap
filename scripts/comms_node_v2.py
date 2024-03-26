@@ -597,3 +597,12 @@ class CommsNode:
         pose.pose.orientation.z = qz
         pose.pose.orientation.w = qw
         self.current_requested_position = pose
+
+
+if __name__ == "__main__":
+    node = CommsNode(
+        group_id=6,
+        takeoff_altitude_m=1,
+        archive_previous_flight_data=False
+    )
+    rospy.spin()
