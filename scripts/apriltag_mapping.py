@@ -9,6 +9,7 @@ from geometry_msgs.msg import TransformStamped
 import nanocamera as nano
 import numpy as np
 
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty, EmptyResponse
 from cap_srvs.srv import FindTag, FindTagResponse, NewTag, NewTagResponse, IsReady, IsReadyResponse
 
@@ -121,10 +122,11 @@ class AprilTagMappingNode:
         tag_id = req.tag_id
         tag_pose, tag_corners, img = self.take_and_process_img(tag_id)
         if tag_pose is None:
-            return FindTagResponse(found=False)
+            transform = TransformStamped()
+            return Bool(False), transform
         else:
             transform = matrix_to_transform_stamped(tag_pose, "vicon", "tag_{}".format(tag_id))
-            return FindTagResponse(found=True, transform=transform)
+            return Bool(True), transform
 
     def new_tag_cb(self, req):
         """
@@ -199,6 +201,6 @@ class AprilTagMappingNode:
         ready = self.current_vicon_pose is not None
         msg = "VICON is ready." if ready else "VICON is not ready."
         rospy.loginfo(msg)
-        return IsReadyResponse(ready=ready, message=msg)
+        return Bool(ready), String(msg)
         
 
