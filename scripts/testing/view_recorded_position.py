@@ -3,6 +3,8 @@ Can be run anywhere. Does not require ROS.
 """
 
 from matplotlib import pyplot as plt
+from pathlib import Path
+import numpy as np
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap
 from cap.data_lib import FLIGHT_DATA_DIR, load_current_flight_tag_map
@@ -130,14 +132,20 @@ def graph_flight_data(flight_data, tag_map: AprilTagMap):
             viz.add_tag(T, size=130/1000, label=f"Tag {tag_id}")
 
     # Plot the setpoint positions as waypoints
+    c = 0
+    prev_waypoint = None
     for i, T in enumerate(setpoint_positions):
-        viz.add_waypoint(T, label=f"Setpoint {i}")
+        if prev_waypoint is None or not np.allclose(T, prev_waypoint):
+            prev_waypoint = T
+            viz.add_waypoint(T, label=f"Setpoint {c}")
+            c += 1
 
     # Plot the three position estimates
-    viz.add_path(vicon_positions, label="Vicon", color='g')
-    viz.add_path(local_positions, label="Local", color='b')
-    viz.add_path(corrected_positions, label="Corrected", color='r')
+    viz.add_path(None, vicon_positions, label="Vicon", color='g')
+    viz.add_path(None, local_positions, label="Local", color='b')
+    viz.add_path(None, corrected_positions, label="Corrected", color='r')
 
+    viz.ax.legend()
     viz.show()
 
 if __name__ == "__main__":
@@ -150,4 +158,6 @@ if __name__ == "__main__":
         print("No tag map found.")
         current_tag_map = None
 
-    flight_data = load_flight_data(flight_data_file, current_tag_map)
+    flight_data = load_flight_data(flight_data_file)
+
+    graph_flight_data(flight_data, current_tag_map)
