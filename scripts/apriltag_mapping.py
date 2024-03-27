@@ -4,18 +4,18 @@
 """
 
 import rospy
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped
 
 import nanocamera as nano
 import numpy as np
 
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty, EmptyResponse
-from cap_srvs.srv import FindTag, NewTag, NewTagResponse, IsReady
+from cap.srv import FindTag, NewTag, NewTagResponse, IsReady
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap, detect_tags, estimate_T_C_A, optimize_tag_pose
 import cap.data_lib as data_lib
-from cap.transformation_lib import matrix_to_params, transform_stamped_to_matrix,  matrix_to_transform_stamped
+from cap.transformation_lib import matrix_to_params, transform_stamped_to_matrix,  matrix_to_transform_stamped, pose_stamped_to_matrix
 
 def start_camera(flip=0, width=1280, height=720):
     # Connect to another CSI camera on the board with ID 1
@@ -28,7 +28,7 @@ def start_camera(flip=0, width=1280, height=720):
         return True, None, camera
 
 class AprilTagMappingNode:
-    def __init__(self, group_number):
+    def __init__(self, group_id, use_local_pose=False):
         node_name = 'apriltag_mapping_node_{:02d}'.format(group_id)
         rospy.init_node(node_name)
 
@@ -42,10 +42,16 @@ class AprilTagMappingNode:
         self.current_tag_data = []
         self.tag_map = AprilTagMap()
 
+        self.use_local_pose = use_local_pose
+
         # Setup up subscribers
         # VICON pose subscriber gives us ground truth pose of the marker
         self.current_vicon_pose = None
-        self.vicon_sub = rospy.Subscriber('/vicon/ROB498_Drone/ROB498_Drone', TransformStamped, callback=self.vicon_cb)
+        if self.use_local_pose:
+            rospy.logwarn("Using local pose")
+            self.local_pose_sub = rospy.Subscriber("mavros/local_position/pose", PoseStamped, callback=self.local_pose_cb)
+        else:
+            self.vicon_sub = rospy.Subscriber('/vicon/ROB498_Drone/ROB498_Drone', TransformStamped, callback=self.vicon_cb)
 
         # Set up Service Servers
         # find_tag immediately returns the tag pose of a given tag id if it is visible in the camera frame
@@ -69,29 +75,30 @@ class AprilTagMappingNode:
             rospy.logerr("Camera failed to capture image. Try restarting the Jetson.")
             return
 
-        if not confirm_non_black_img(self.camera):
-            rospy.logerr("Camera is not capturing images. Confirm that the lens cap is removed.")
-            return
-
         # Spin until we have valid VICON data
         while not rospy.is_shutdown():
             if self.current_vicon_pose is not None:
                 break
             rospy.sleep(0.1)
-        
-        rospy.loginfo("AprilTag Mapping Node is ready.")
-        rospy.spin()
 
     def vicon_cb(self, msg):
         """
         Callback function for the VICON pose subscriber
         """
-        self.current_vicon_pose = msg
+        if not self.use_local_pose:
+            self.current_vicon_pose = msg
+
+    def local_pose_cb(self, msg):
+        if self.use_local_pose:
+            self.current_vicon_pose = msg
 
     def take_and_process_img(self, tag_id):
         """
 
         """
+        if self.current_vicon_pose is None:
+            rospy.logerr("Cannot get marker pose since no VICON pose availible")
+            return None, None, None
         img_position = self.current_vicon_pose
         img = self.camera.read()
         if img is None:
@@ -110,7 +117,10 @@ class AprilTagMappingNode:
         # T_marker_tag = T_marker_camera * T_camera_tag = (T_camera_marker)^-1 * T_camera_tag
         T_marker_tag = np.linalg.inv(self.extrinsics) @ T_camera_tag
 
-        T_VICON_marker = transform_stamped_to_matrix(img_position)
+        if self.use_local_pose:
+            T_VICON_marker = pose_stamped_to_matrix(img_position)
+        else:
+            T_VICON_marker = transform_stamped_to_matrix(img_position)
         T_VICON_tag = T_VICON_marker @ T_marker_tag
 
         return T_VICON_tag, tag_corners, img
@@ -119,7 +129,7 @@ class AprilTagMappingNode:
         """
         Callback function for the find_tag service
         """
-        tag_id = req.tag_id
+        tag_id = req.tag_id.data
         tag_pose, tag_corners, img = self.take_and_process_img(tag_id)
         if tag_pose is None:
             transform = TransformStamped()
@@ -151,7 +161,10 @@ class AprilTagMappingNode:
             rospy.logwarn("Tag not found in image.")
             return EmptyResponse()
 
-        T_VICON_marker = transform_stamped_to_matrix(img_position)
+        if self.use_local_pose:
+            T_VICON_marker = pose_stamped_to_matrix(img_position)
+        else:
+            T_VICON_marker = transform_stamped_to_matrix(img_position)
         self.current_tag_data.append((tag_pose, tag_corners, img, T_VICON_marker))
 
         return EmptyResponse()
@@ -204,3 +217,18 @@ class AprilTagMappingNode:
         return Bool(ready), String(msg)
         
 
+if __name__ == "__main__":
+    n = None
+    try:
+        n = AprilTagMappingNode(
+            group_id=6,
+            use_local_pose=True
+        )
+        rospy.loginfo("AprilTag Mapping Node is ready.")
+        rospy.spin()
+    except Exception as e:
+        n.camera.release()
+        raise e
+    if n is not None:
+        n.camera.release()
+    

@@ -9,9 +9,12 @@ import json
 
 import rospy
 from std_srvs.srv import Empty
+from std_msgs.msg import Int64
 from cap.srv import TagPoses
 from cap.srv import SetPosition
 from cap.msg import TagTransform
+from cap.srv import FindTag, FindTagResponse
+from cap.srv import NewTag, NewTagResponse
 from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
 
 from cap.transformation_lib import matrix_to_params
@@ -20,12 +23,14 @@ from cap.data_lib import FLIGHT_INPUTS_DIR
 
 class GroundStationNode:
     def __init__(self, group_id: int = 6):
+        print("Starting Ground Station")
         node_name = f'ground_station_{group_id:02d}'
         rospy.init_node(node_name)
 
         comms_node_name = f'rob498_drone_{group_id:02d}'
 
         # Define the service clients
+        print("Waiting for comms node")
         rospy.wait_for_service(f'{comms_node_name}/comm/ping')
         self.ping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/ping', Empty)
         rospy.wait_for_service(f'{comms_node_name}/comm/launch')
@@ -41,6 +46,18 @@ class GroundStationNode:
         self.begin_mapping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_mapping', TagPoses)
         rospy.wait_for_service(f'{comms_node_name}/comm/begin_inspecting')
         self.begin_inspecting_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_inspecting', Empty)
+
+        # Test mapping clients
+        ## AprilTag Mapping Services
+        # Instruct the mapping node to find the location of a tag in the world based on a single image
+        self.srv_apriltag_mapping_find_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/find_tag", FindTag)
+        # Instruct the mapping node to expect a new tag id
+        self.srv_apriltag_mapping_new_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/new_tag", NewTag)
+        # Instruct the mapping node to capture an image
+        self.srv_apriltag_mapping_capture_img = rospy.ServiceProxy("/capdrone/apriltag_mapping/capture_img", Empty)
+        # Instruct the mapping node to process the tag
+        # Once this returns, we will have a new tag map in the flight data directory
+        self.src_apriltag_mapping_process_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/process_tag", Empty)
 
         self.begin_input_loop()
 
@@ -79,7 +96,27 @@ class GroundStationNode:
                 position = [float(coord) for coord in position.split()]
             else:
                 position = None
+            
+            if command == 'test_map':
+                print("Entering mapping testing loop")
+                while True:
+                    command = input("Enter Mapping Command (f=find_tag, n=new_tag, c=take_image, p=process_tag)")
+                    if command == 'f':
+                        tag_id = int(input("Enter tag id"))
+                        self.find_tag(tag_id)
+                    elif command == 'q':
+                        break
             Thread(target=execute_command, args=(command, position), daemon=True).start()
+
+    def find_tag(self, tag_id: int):
+        tag_id_param = Int64(tag_id)
+        res = self.srv_apriltag_mapping_find_tag(tag_id_param)
+        found = res.found.data
+        transform = res.transform
+        if found:
+            print(f"Found tag with transform:\n{transform}")
+        else:
+            print(f"Tag not found")
 
     def ping(self):
         self.ping_client()

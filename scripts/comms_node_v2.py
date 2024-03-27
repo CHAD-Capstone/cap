@@ -113,7 +113,7 @@ class CommsNode:
 
         ## AprilTag Mapping Services
         # Instruct the mapping node to find the location of a tag in the world based on a single image
-        self.srv_apriltag_mapping_find_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/find_tag", TagPoses)
+        self.srv_apriltag_mapping_find_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/find_tag", FindTag)
         # Instruct the mapping node to expect a new tag id
         self.srv_apriltag_mapping_new_tag = rospy.ServiceProxy("/capdrone/apriltag_mapping/new_tag", NewTag)
         # Instruct the mapping node to capture an image

@@ -91,7 +91,7 @@ class RecordCorrectedPositionNode:
 
     def run(self):
         # Save once every 10 seconds
-        rate = rospy.Rate(1/10)
+        rate = rospy.Rate(1/2)
         while not rospy.is_shutdown():
             self.save_data()
             rate.sleep()

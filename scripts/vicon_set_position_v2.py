@@ -11,6 +11,8 @@ Finally, we also publish a PoseStamped to /capdrone/local_position/pose which is
 import rospy
 import numpy as np
 
+from collections import deque
+
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseStamped
@@ -26,7 +28,7 @@ from cap.srv import IsReady, IsReadyResponse
 
 from cap.msg import TagTransformArray
 
-from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped, params_to_matrix
 from cap.timestamp_queue import TimestampQueue
 
 class ViconPositionSetNode:
@@ -38,12 +40,18 @@ class ViconPositionSetNode:
         self.ready = False
         self.ready_state = "Starting"
 
+        # At the start, we assume that the VICON frame coincides with the local frame
+        self.T_realsense_VICON = np.eye(4)
+
+        self.got_VICON = False
+
         # If pass_through is true then it is assumed that the realsense and VICON frames always coincide
         self.pass_through = pass_though
         # If use_vicon is true then the transform will be based off of ground truth VICON data
         self.use_vicon = use_vicon
         # If use_apriltag_loc is true then the transform will be based off of the estimated VICON data from the localization node
         self.use_apriltag_loc = use_apriltag_loc
+        self.apriltag_transform_queue = deque(maxlen=5)
 
         # VICON Inputs
         # Ground truth VICON from the real system
@@ -76,11 +84,6 @@ class ViconPositionSetNode:
         # Service call to set the localization mode (VICON, APRILTAG, REALSENSE)
         self.set_localization_mode_service = rospy.Service('/capdrone/set_localization_mode', SetLocalizationMode, self.set_localization_mode_cb)
         self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
-
-        # At the start, we assume that the VICON frame coincides with the local frame
-        self.T_realsense_VICON = np.eye(4)
-
-        self.got_VICON = False
 
         # If we are using VICON, we need to wait for the first VICON message before we can start
         if self.use_vicon:
@@ -161,17 +164,24 @@ class ViconPositionSetNode:
         Takes in a VICON transform and updates the transformation matrix
         The VICON transform is T_VICON_marker, that is the transform from the marker frame to the VICON frame, or the position of the marker in the VICON frame
         """
+        # print(f"Received VICON pose\n{vicon_transform}")
         T_VICON_marker = transform_stamped_to_matrix(vicon_transform)
         # We get the corresponding local position by searching in the local position queue for the closest timestamp
         local_position_elems = self.local_position_queue.search(vicon_timestamp)
         if local_position_elems is None:
             # Then the queue was empty
+            rospy.logwarn("Could not update transform since the local position queue was empty")
             return False
+        min_queue_timestamp = self.local_position_queue.queue[0].timestamp
+        max_queue_timestamp = self.local_position_queue.queue[-1].timestamp
+        print(f"Min and max timestamps: {min_queue_timestamp} {max_queue_timestamp} (of {len(self.local_position_queue.queue)})")
         if len(local_position_elems) == 1:
+            rospy.loginfo(f"Update Timestamp: {vicon_timestamp} - Local Timestamp: {local_position_elems[0].timestamp}")
             local_position = pose_stamped_to_matrix(local_position_elems[0].data)
         else:
             # Then we should interpolate between the two closest local positions, but that is hard so for now we just use the closest one
             ts1, ts2 = local_position_elems[0].timestamp, local_position_elems[1].timestamp
+            rospy.loginfo(f"Update Timestamp: {vicon_timestamp} - Local Timestamps: {(ts1, ts2)}")
             if abs(ts1 - vicon_timestamp) < abs(ts2 - vicon_timestamp):
                 local_position = pose_stamped_to_matrix(local_position_elems[0].data)
             else:
@@ -181,7 +191,25 @@ class ViconPositionSetNode:
         # Then to get the transform from the VICON frame to the realsense frame we need
         # T_realsense_VICON = T_realsense_marker @ T_marker_VICON
         T_realsense_VICON = local_position @ np.linalg.inv(T_VICON_marker)
-        self.T_realsense_VICON = T_realsense_VICON
+        T_params_euler = matrix_to_params(T_realsense_VICON, type="euler")
+
+        T_VICON_marker_params = matrix_to_params(T_VICON_marker, type="euler")
+        T_local_position_params = matrix_to_params(local_position, type="euler")
+        print(f"\n\nVICON pose params: {T_VICON_marker_params}")
+        print(f"Local pose params: {T_local_position_params}\n\n")
+
+        if self.use_apriltag_loc:
+            # Then we are going to do some post-processing to try to get a better result
+            self.apriltag_transform_queue.append(T_params_euler)
+            T_avg_params = np.mean(np.array(self.apriltag_transform_queue), axis=0)
+            # Zero the roll and pitch
+            T_avg_params[3] = 0
+            T_avg_params[4] = 0
+            self.T_realsense_VICON = params_to_matrix(T_avg_params, type="euler")
+        else:
+            self.T_realsense_VICON = T_realsense_VICON
+
+        rospy.loginfo(f"Got new T_realsense_VICON:\n{self.T_realsense_VICON}\nUsing params:\n{T_params_euler}")
         self.update_corrected_position()
         return True
 
@@ -198,7 +226,7 @@ class ViconPositionSetNode:
             # Then our corrected position is the same as the uncorrected position
             self.corrected_position_pub.publish(self.current_uncorrected_position)
             self.current_corrected_position = self.current_uncorrected_position
-        else:
+        else:   
             # Then we need to project this position into the VICON frame
             current_header = self.current_uncorrected_position.header
             # Get the transform from the local frame to the VICON frame
@@ -259,6 +287,7 @@ class ViconPositionSetNode:
         if self.use_vicon:
             # vicon_timestamp = msg.header.stamp.to_sec()
             vicon_timestamp = rospy.get_time()  # The VICON timestamp is misaligned with our local ros time
+            print(f"Go vicon callback\n{msg}")
             self.update_transform(vicon_timestamp, msg)
             self.got_VICON = True
 
@@ -266,29 +295,33 @@ class ViconPositionSetNode:
         if self.use_apriltag_loc:
             # We can get multiple transforms from the localization node and we need to select one to do the transformation
             # We use the heuristic that poses that are closer to our current estimated position are more likely to be correct
-            if current_corrected_position is None:
+            if self.current_corrected_position is None:
                 # Then we just use the first one
                 apriltag_transform = msg.transforms[0]
             else:
                 # For now, we only use the position part of the transform
-                current_corrected_position_matrix = pose_stamped_to_matrix(current_corrected_position)
+                current_corrected_position_matrix = pose_stamped_to_matrix(self.current_corrected_position)
                 current_corrected_position_position = current_corrected_position_matrix[:3, 3]
 
                 # We select the transform that is closest to our current position
                 closest_transform = None
+                closest_tag_id = None
                 closest_distance = np.inf
-                for transform in msg.transforms:
-                    position = transform.transform.translation
+                for tag_info in msg.tags:
+                    tag_id = tag_info.tag_id
+                    transform_stamped = tag_info.transform
+                    position = transform_stamped.transform.translation
                     distance = np.linalg.norm(np.array([position.x, position.y, position.z]) - current_corrected_position_position)
                     if distance < closest_distance:
                         closest_distance = distance
-                        closest_transform = transform
+                        closest_transform = transform_stamped
+                        closest_tag_id = tag_id
                 apriltag_transform = closest_transform
 
-            # We need to update the transformation matrix
-            # This time our header should be correct since this is coming from on the drone so we can use the timestamp
-            apriltag_timestamp = apriltag_transform.header.stamp.to_sec()
-            self.update_transform(apriltag_timestamp, apriltag_transform)
+        # We need to update the transformation matrix
+        # This time our header should be correct since this is coming from on the drone so we can use the timestamp
+        apriltag_timestamp = apriltag_transform.header.stamp.to_sec()
+        self.update_transform(apriltag_timestamp, apriltag_transform)
 
 if __name__ == "__main__":
     import argparse
