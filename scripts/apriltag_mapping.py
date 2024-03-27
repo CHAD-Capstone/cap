@@ -11,7 +11,7 @@ import numpy as np
 
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty, EmptyResponse
-from cap_srvs.srv import FindTag, FindTagResponse, NewTag, NewTagResponse, IsReady, IsReadyResponse
+from cap_srvs.srv import FindTag, NewTag, NewTagResponse, IsReady
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap, detect_tags, estimate_T_C_A, optimize_tag_pose
 import cap.data_lib as data_lib
