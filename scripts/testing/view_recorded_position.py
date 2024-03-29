@@ -95,6 +95,7 @@ class Viewer:
         self.ax.plot(x, y, z, label=label, color=color)
 
     def show(self):
+        self.ax.legend()
         plt.show()
 
 def load_flight_data(flight_data_file: Path):
@@ -114,14 +115,28 @@ def load_flight_data(flight_data_file: Path):
 def graph_flight_data(flight_data, tag_map: AprilTagMap):
     # Process the flight data
     setpoint_data = flight_data['setpoint_position_local']
+    uncorrected_setpoint_data = flight_data['setpoint_uncorrected'] if 'setpoint_uncorrected' in flight_data else None
     vicon_data = flight_data['vicon']
     local_data = flight_data['local_position']
     corrected_data = flight_data['corrected_position']
 
-    setpoint_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in setpoint_data])
-    vicon_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in vicon_data])
-    local_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in local_data])
-    corrected_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in corrected_data])
+    frame_transform_data = flight_data['frame_transform']
+
+    vicon_position_timestamps = np.array([pose[0] for pose in vicon_data])
+    print(f"VICON Timestamp Min: {vicon_position_timestamps.min()}. Max: {vicon_position_timestamps.max()}")
+    local_position_timestamps = np.array([pose[0] for pose in local_data])
+    print(f"Local Timestamp Min: {local_position_timestamps.min()}. Max: {local_position_timestamps.max()}")
+
+    start_time_s = 0
+    data_start_time = start_time_s + vicon_position_timestamps.min()
+
+    setpoint_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in setpoint_data if pose[0] > data_start_time])
+    uncorrected_setpoint_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in uncorrected_setpoint_data if pose[0] > data_start_time]) if uncorrected_setpoint_data is not None else None
+    vicon_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in vicon_data if pose[0] > data_start_time])
+    local_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in local_data if pose[0] > data_start_time])
+    corrected_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in corrected_data if pose[0] > data_start_time])
+
+    frame_transforms = np.array([params_to_matrix(pose[1], type="quaternion") for pose in frame_transform_data if pose[0] > data_start_time])
 
     viz = Viewer(size=2)
 
@@ -140,17 +155,49 @@ def graph_flight_data(flight_data, tag_map: AprilTagMap):
             viz.add_waypoint(T, label=f"Setpoint {c}")
             c += 1
 
+    if uncorrected_setpoint_positions is not None:
+        for i, T in enumerate(uncorrected_setpoint_positions[::10]):
+            viz.add_waypoint(T, label=f"UC {i}")
+
     # Plot the three position estimates
     viz.add_path(None, vicon_positions, label="Vicon", color='g')
     viz.add_path(None, local_positions, label="Local", color='b')
     viz.add_path(None, corrected_positions, label="Corrected", color='r')
 
-    viz.ax.legend()
+    viz.add_path(None, frame_transforms, label="Frame Transforms", color="k")
+
     viz.show()
+
+def graph_transform_solver(transform_data):
+    vicon_pose_data = transform_data["vicon_pose"]  #[(timestamp, pose_params),...]
+    local_pose_data = transform_data["local_pose"]  #[(timestamp, pose_params),...]
+    frame_transform_data = transform_data["frame_transform"]  #[(timestamp, pose_params),...]
+
+    start_time_offset = vicon_pose_data[0][0]
+    start_time = 0
+
+    data_start_time = start_time + start_time_offset
+
+    vicon_pose_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in vicon_pose_data if pose[0] > data_start_time])
+    local_pose_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in local_pose_data if pose[0] > data_start_time])
+    frame_transform_positions = np.array([params_to_matrix(pose[1], type="quaternion") for pose in frame_transform_data if pose[0] > data_start_time])
+
+    viz = Viewer(size=2)
+
+    print(vicon_pose_positions[:, :3, 3])
+
+    viz.add_path(None, vicon_pose_positions, label="VICON", color='g')
+    viz.add_path(None, local_pose_positions, label="Local", color='b')
+    viz.add_path(None, frame_transform_positions, label="Transform", color='k')
+
+    viz.show()
+
+
 
 if __name__ == "__main__":
     FLIGHT_DATA_DIR.mkdir(parents=True, exist_ok=True)
     flight_data_file = FLIGHT_DATA_DIR / f"flight_data.npy"
+    transform_solver_file = FLIGHT_DATA_DIR / f"transform_solver_test.npy"
 
     try:
         current_tag_map = load_current_flight_tag_map()
@@ -158,6 +205,10 @@ if __name__ == "__main__":
         print("No tag map found.")
         current_tag_map = None
 
-    flight_data = load_flight_data(flight_data_file)
+    # flight_data = load_flight_data(flight_data_file)
 
-    graph_flight_data(flight_data, current_tag_map)
+    # graph_flight_data(flight_data, current_tag_map)
+
+
+    transform_solver_data = load_flight_data(transform_solver_file)
+    graph_transform_solver(transform_solver_data)
