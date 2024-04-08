@@ -39,6 +39,7 @@ class TransformSolverNode:
         self.current_local_position = (-1, None)  # Timestamp & transform
         self.current_vicon_position = (-1, None)
         self.T_realsense_VICON = (-1, None)
+        self.start_time = rospy.get_time()
 
         self.local_position_queue = TimestampQueue(max_length=100)
 
@@ -64,33 +65,45 @@ class TransformSolverNode:
         print("Got local position")
 
         rate = rospy.Rate(1/2)
-        while not rospy.is_shutdown():
-            self.save_data()
-            rate.sleep()
+        # while not rospy.is_shutdown():
+        #     self.save_data()
+        #     rate.sleep()
+        self.got_update = False
+        self.update_loop_thread = None
+        self.should_exit_loop = False
+        self.start_update_transform_thread()
+
+        rospy.spin()
+
+        self.should_exit_loop = True
+        if self.update_loop_thread is not None:
+            self.update_loop_thread.join()
         self.save_data()
 
     def vicon_cb(self, msg):
         """
         Computes T_VICON_marker
         """
-        # vicon_timestamp = rospy.get_time()
-        def add_with_delay(msg):
-            rospy.sleep(1)
-            vicon_timestamp = msg.header.stamp.to_sec()
-            T_matrix = transform_stamped_to_matrix(msg)
-            T_params = matrix_to_params(T_matrix, type="quaternion")
-            self.current_vicon_position = (vicon_timestamp, T_params)
-            self.flight_data["vicon_pose"].append(self.current_vicon_position)
-            self.update_transform()
-            
+        # # vicon_timestamp = rospy.get_time()
+        # def add_with_delay(msg):
+        #     rospy.sleep(0)
+        #     vicon_timestamp = msg.header.stamp.to_sec()
+        #     T_matrix = transform_stamped_to_matrix(msg)
+        #     T_params = matrix_to_params(T_matrix, type="quaternion")
+        #     self.current_vicon_position = (vicon_timestamp, T_params)
+        #     self.flight_data["vicon_pose"].append(self.current_vicon_position)
+        #     self.update_transform()
+        # Thread(target=add_with_delay, args=(msg,), daemon=True).start()
 
-        # vicon_timestamp = msg.header.stamp.to_sec()
-        # T_matrix = transform_stamped_to_matrix(msg)
-        # T_params = matrix_to_params(T_matrix, type="quaternion")
-        # self.current_vicon_position = (vicon_timestamp, T_params)
-        # self.flight_data["vicon_pose"].append(self.current_vicon_position)
+        vicon_timestamp = msg.header.stamp.to_sec()
+        drone_time = rospy.get_time()
+        T_matrix = transform_stamped_to_matrix(msg)
+        T_params = matrix_to_params(T_matrix, type="quaternion")
+        self.current_vicon_position = (vicon_timestamp, T_params)
+        print(f"VICON Latency: {drone_time - vicon_timestamp}. V: {vicon_timestamp - self.start_time}, D: {drone_time - self.start_time}")
+        self.flight_data["vicon_pose"].append(self.current_vicon_position)
+        self.got_update = True
         # self.update_transform()
-        Thread(target=add_with_delay, args=(msg,), daemon=True).start()
 
     def local_position_cb(self, msg):
         """
@@ -103,7 +116,20 @@ class TransformSolverNode:
         self.current_local_position = (pose_timestamp, T_params)
         self.local_position_queue.enqueue(pose_timestamp, T_params)
         self.flight_data["local_pose"].append(self.current_local_position)
-        self.update_transform()
+        self.got_update = True
+        # self.update_transform()
+
+    def start_update_transform_thread(self):
+        def start_update_loop():
+            rate = rospy.Rate(50)
+            while not rospy.is_shutdown() and not self.should_exit_loop:
+                if self.got_update:
+                    self.update_transform()
+                    self.got_update = False
+                rate.sleep()
+        
+        self.update_loop_thread = Thread(target=start_update_loop, daemon=True)
+        self.update_loop_thread.start()
 
     def update_transform(self):
         vicon_ts, T_VICON_marker_params = self.current_vicon_position
@@ -117,14 +143,17 @@ class TransformSolverNode:
         local_ts = local_position_elems[0].timestamp
 
         if abs(vicon_ts - local_ts) > 0.1:
-            # rospy.logerr("TIMESTAMPS MISALIGNED")
+            rospy.logerr(f"TIMESTAMPS MISALIGNED. VICON: {vicon_ts}, Local: {local_ts}")
             return False
 
         #print(f"\n\nVicon: {T_VICON_marker_params[:3]}")
         #print(f"local: {T_local_marker_params[:3]}")
 
-        T_local_marker = params_to_matrix(T_local_marker_params)
-        T_VICON_marker = params_to_matrix(T_VICON_marker_params)
+        T_local_marker = params_to_matrix(T_local_marker_params, type="quaternion")
+        T_VICON_marker = params_to_matrix(T_VICON_marker_params, type="quaternion")
+
+        # print(f"\n\nVicon:\n{T_VICON_marker}\n")
+        # print(f"Local:\n{T_local_marker}\n")
         T_local_VICON = T_local_marker @ np.linalg.inv(T_VICON_marker)
 
         T_ts = (vicon_ts + local_ts) / 2
