@@ -7,29 +7,17 @@ A test script for solving for the transform between the VICON frame and the dron
 import rospy
 import numpy as np
 
-from geometry_msgs.msg import Point
-from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseStamped
-from geometry_msgs.msg import Quaternion
-from geometry_msgs.msg import Transform
 from geometry_msgs.msg import TransformStamped
-from geometry_msgs.msg import Vector3
-from geometry_msgs.msg import TwistStamped
-from std_msgs.msg import Bool
 
 from threading import Thread
 
-from cap.srv import SetLocalizationMode, SetLocalizationModeResponse
-from cap.srv import IsReady, IsReadyResponse
-
-from cap.msg import TagTransformArray
-
-from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped, params_to_matrix
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, params_to_matrix
 from cap.timestamp_queue import TimestampQueue
 
 from cap.data_lib import FLIGHT_DATA_DIR
 
-import tf2_ros
+import tf2_ros as tf2
 
 class TransformSolverNode:
     def __init__(self, group_number: int = 6):
@@ -55,12 +43,12 @@ class TransformSolverNode:
         self.local_position_sub = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, callback=self.local_position_cb)
 
         print("Waiting for VICON...")
-        while self.current_vicon_position[1] == -1 and not rospy.is_shutdown():
+        while self.current_vicon_position[1] is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
         print("Got VICON")
 
         print("Waiting for local position...")
-        while self.current_local_position[1] == -1 and not rospy.is_shutdown():
+        while self.current_local_position[1] is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
         print("Got local position")
 
@@ -79,6 +67,43 @@ class TransformSolverNode:
         if self.update_loop_thread is not None:
             self.update_loop_thread.join()
         self.save_data()
+
+    def publish_local_pose_transform(self, pose_msg):
+        frame_id = "realsense_world"
+        child_frame_id = "drone"
+        transform_stamped = TransformStamped()
+
+        # Copy the header from the pose message and update the frames
+        transform_stamped.header.stamp = pose_msg.header.stamp
+        transform_stamped.header.frame_id = frame_id
+        transform_stamped.child_frame_id = child_frame_id
+
+        # Copy the pose from the pose message
+        transform_stamped.transform.translation = pose_msg.pose.position
+        transform_stamped.transform.rotation = pose_msg.pose.orientation
+
+        self.local_pose_br.sendTransform(transform_stamped)
+
+    def get_local_pose_at_time(self, timestamp):
+        """
+        Get the local pose at a given timestamp using the tfBuffer
+
+        timestamp: time object. Extracted from header.stamp of a message
+
+        Returns the pose as [x, y, z, qx, qy, qz, qw]
+        """
+        trans = self.tfBuffer.lookup_transform("realsense_world", "drone", timestamp)
+        translation = trans.transform.translation
+        rotation = trans.transform.rotation
+        return np.array([
+            translation.x, translation.y, translation.z,
+            rotation.x, rotation.y, rotation.z, rotation.w
+        ])
+
+        def add_flight_data(self, key, data):
+        timestamp, transform = data
+        timestamp_s = timestamp.to_sec()
+        self.flight_data[key].append((timestamp_s, transform))
 
     def vicon_cb(self, msg):
         """
@@ -110,7 +135,7 @@ class TransformSolverNode:
         Computes T_realsense_marker
         """
         # pose_timestamp = rospy.get_time()
-        pose_timestamp = msg.header.stamp.to_sec()
+        pose_timestamp = msg.header.stamp
         T_matrix = pose_stamped_to_matrix(msg)
         T_params = matrix_to_params(T_matrix, type="quaternion")
         self.current_local_position = (pose_timestamp, T_params)
@@ -133,6 +158,7 @@ class TransformSolverNode:
 
     def update_transform(self):
         vicon_ts, T_VICON_marker_params = self.current_vicon_position
+        vicon_ts_sec = vicon_ts.to_sec()
 
         if len(self.local_position_queue.queue) == 0:
             rospy.logwarn("No Local Positions in Queue")
