@@ -15,7 +15,8 @@ from cap.srv import FindTag, NewTag, NewTagResponse, IsReady
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap, detect_tags, estimate_T_C_A, optimize_tag_pose
 import cap.data_lib as data_lib
-from cap.transformation_lib import matrix_to_params, transform_stamped_to_matrix,  matrix_to_transform_stamped, pose_stamped_to_matrix
+from cap.data_lib import FLIGHT_DATA_DIR
+from cap.transformation_lib import matrix_to_params, params_to_matrix, transform_stamped_to_matrix,  matrix_to_transform_stamped, pose_stamped_to_matrix
 
 def start_camera(flip=0, width=1280, height=720):
     # Connect to another CSI camera on the board with ID 1
@@ -28,9 +29,20 @@ def start_camera(flip=0, width=1280, height=720):
         return True, None, camera
 
 class AprilTagMappingNode:
-    def __init__(self, group_id, use_local_pose=False):
+    def __init__(self, group_id, use_local_pose=False, optimize=False):
         node_name = 'apriltag_mapping_node_{:02d}'.format(group_id)
         rospy.init_node(node_name)
+
+        self.optimize = optimize
+
+        self.mapping_data_file = FLIGHT_DATA_DIR / f"mapping_data.npy"
+        self.mapping_data = {
+            "drone_pose": [],  # (timestamp, [x y z qx qy qz qw]). Records all drone positions
+            "find_tag_cmd": [],  # (timestamp, (int, [x y z qx qy qz qw])). Records which tag was captured and the tag pose
+            "new_tag_cmd": [],  # (timestamp, int). Records the tag id when we start capturing a new tag
+            "capture_img_cmd": [],  # (timestamp, (int, [x y z qx qy qz qw], [x y z qx qy qz qw])). Record the tag id, drone pose and tag pose when we capture a new image
+            "process_tag_cmd": [],  # (timestamp, (int, [x y z qx qy qz qw])). Record the optimized tag id and pose
+        }
 
         # Get camera parameters
         self.camera_matrix, self.dist_coeffs = data_lib.load_final_intrinsics_calibration()
@@ -81,16 +93,33 @@ class AprilTagMappingNode:
                 break
             rospy.sleep(0.1)
 
+    def add_mapping_data(self, key, data):
+        timestamp, meta = data
+        timestamp_s = timestamp.to_sec()
+        self.mapping_data[key].append((timestamp_s, meta))
+
+    def save_data(self):
+        rospy.loginfo(f"Saving data")
+        for key, arr in self.mapping_data.items():
+            print(f"\t{key}: {len(arr)}")
+        np.save(self.mapping_data_file, self.mapping_data)
+
     def vicon_cb(self, msg):
         """
         Callback function for the VICON pose subscriber
         """
         if not self.use_local_pose:
             self.current_vicon_pose = msg
+            T = transform_stamped_to_matrix(msg)
+            T_params = matrix_to_params(T, type="quaternion")
+            self.add_mapping_data("drone_pose", (msg.header.stamp, T_params))
 
     def local_pose_cb(self, msg):
         if self.use_local_pose:
             self.current_vicon_pose = msg
+            T = pose_stamped_to_matrix(msg)
+            T_params = matrix_to_params(T, type="quaternion")
+            self.add_mapping_data("drone_pose", (msg.header.stamp, T_params))
 
     def take_and_process_img(self, tag_id):
         """
@@ -135,6 +164,8 @@ class AprilTagMappingNode:
             transform = TransformStamped()
             return Bool(False), transform
         else:
+            T_params = matrix_to_params(tag_pose, type="quaternion")
+            self.add_mapping_data("find_tag_cmd", (rospy.Time.now(), (tag_id, T_params)))
             transform = matrix_to_transform_stamped(tag_pose, "vicon", "tag_{}".format(tag_id))
             return Bool(True), transform
 
@@ -142,9 +173,12 @@ class AprilTagMappingNode:
         """
         Callback function for the new_tag service
         """
+        rospy.loginfo("New Tag")
         tag_id = req.tag_id
-        self.current_tag_id = tag_id
+        self.current_tag_id = tag_id.data
         self.current_tag_data = []
+        rospy.loginfo("Reset tag info")
+        self.add_mapping_data("new_tag_cmd", (rospy.Time.now(), self.current_tag_id))
         return NewTagResponse()
 
     def capture_img_cb(self, req):
@@ -166,6 +200,12 @@ class AprilTagMappingNode:
         else:
             T_VICON_marker = transform_stamped_to_matrix(img_position)
         self.current_tag_data.append((tag_pose, tag_corners, img, T_VICON_marker))
+        rospy.loginfo(f"Drone pose at time of img:\n{T_VICON_marker}")
+        rospy.loginfo(f"Tag pose:\n{tag_pose}")
+
+        T_VICON_marker_params = matrix_to_params(T_VICON_marker, type="quaternion")
+        tag_pose_params = matrix_to_params(tag_pose, type="quaternion")
+        self.add_mapping_data("capture_img_cmd", (rospy.Time.now(), (self.current_tag_id, T_VICON_marker_params, tag_pose_params)))
 
         return EmptyResponse()
 
@@ -181,26 +221,38 @@ class AprilTagMappingNode:
             rospy.logwarn("No images captured. Use the capture_img service to capture images.")
             return EmptyResponse()
 
-        initial_tag_pose = self.current_tag_data[0][0]
-        tag_px_positions = {}
-        drone_poses = {}
-        for img_idx in range(len(self.current_tag_data)):
-            tag_pose, tag_corners, img, T_VICON_marker = self.current_tag_data[img_idx]
-            tag_px_positions[img_idx] = tag_corners
-            drone_poses[img_idx] = T_VICON_marker
+        if self.optimize:
+            initial_tag_pose = self.current_tag_data[0][0]
+            tag_px_positions = {}
+            drone_poses = {}
+            for img_idx in range(len(self.current_tag_data)):
+                tag_pose, tag_corners, img, T_VICON_marker = self.current_tag_data[img_idx]
+                tag_px_positions[img_idx] = tag_corners
+                drone_poses[img_idx] = T_VICON_marker
 
-        optimized_tag_pose = optimize_tag_pose(
-            initial_tag_pose,
-            tag_px_positions,
-            drone_poses,
-            tag_size=self.tag_size,
-            camera_matrix=self.camera_matrix,
-            distortion_coefficients=self.dist_coeffs,
-            camera_extrinsics=self.extrinsics
-        )  # 4x4 homogeneous transformation matrix
+            optimized_tag_pose = optimize_tag_pose(
+                initial_tag_pose,
+                tag_px_positions,
+                drone_poses,
+                tag_size=self.tag_size,
+                camera_matrix=self.camera_matrix,
+                distortion_coefficients=self.dist_coeffs,
+                camera_extrinsics=self.extrinsics
+            )  # 4x4 homogeneous transformation matrix
+        else:
+            # Then instead we take the median of the tag poses
+            tag_poses = np.zeros((len(self.current_tag_data), 7))
+            for img_idx in range(len(self.current_tag_data)):
+                tag_pose = self.current_tag_data[img_idx][0]
+                tag_poses[img_idx] = matrix_to_params(tag_pose, type="quaternion")
+            optimized_tag_pose_params = np.median(tag_poses, axis=0)
+            optimized_tag_pose = params_to_matrix(optimized_tag_pose_params, type="quaternion")
 
         self.tag_map.add_tag_pose(self.current_tag_id, optimized_tag_pose)
         rospy.loginfo(f"Tag {self.current_tag_id} pose optimized and added to tag map.")
+
+        optimized_tag_pose_params = matrix_to_params(optimized_tag_pose, type="quaternion")
+        self.add_mapping_data("process_tag_cmd", (rospy.Time.now(), (self.current_tag_id, optimized_tag_pose_params)))
 
         self.current_tag_id = None
         self.current_tag_data = []
@@ -222,7 +274,8 @@ if __name__ == "__main__":
     try:
         n = AprilTagMappingNode(
             group_id=6,
-            use_local_pose=True
+            use_local_pose=True,
+            optimize=False
         )
         rospy.loginfo("AprilTag Mapping Node is ready.")
         rospy.spin()
@@ -231,4 +284,5 @@ if __name__ == "__main__":
         raise e
     if n is not None:
         n.camera.release()
+        n.save_data()
     

@@ -136,7 +136,7 @@ class CommsNode:
         self.current_pose_VICON: PoseStamped = None
         pose_sub = rospy.Subscriber("/capdrone/local_position/pose", PoseStamped, callback = self.pose_cb)
         self.current_velocity_VICON: TwistStamped = None
-        velocity_sub = rospy.Subscriber("/capdrone/local_position/local_velocity", TwistStamped, callback = self.velocity_cb)
+        velocity_sub = rospy.Subscriber("/mavros/local_position/local_velocity", TwistStamped, callback = self.velocity_cb)
 
     ##### Setup Functions #####
     def wait_for_service_ready(self, service_name: str):
@@ -438,7 +438,8 @@ class CommsNode:
         Returns True if the drone's velocity is below the given threshold
         """
         if self.current_velocity_VICON is None:
-            return False
+            rospy.logwarn("VELOCITY UNAVAILBALE")
+            return True
         velocity = self.current_velocity_VICON.twist.linear
         print(f"Velocities: {(abs(velocity.x), abs(velocity.y), abs(velocity.z))}. {threshold} - {((abs(velocity.x) < threshold), (abs(velocity.y) < threshold), (abs(velocity.z) < threshold))}")
         return (abs(velocity.x) < threshold) and (abs(velocity.y) < threshold) and (abs(velocity.z) < threshold)
@@ -463,14 +464,18 @@ class CommsNode:
             orientation = (0, 0, 0, 1)
         qx, qy, qz, qw = orientation
         self.move_to(x, y, z, qx=qx, qy=qy, qz=qz, qw=qw)
-        is_at_postion = self.wait_until_at_position(x, y, z, position_tolerance, should_exit_function, settle_time)
+        # is_at_position = self.wait_until_at_position(x, y, z, position_tolerance, should_exit_function, settle_time)
+        is_at_position = self.is_at_position(x, y, z, position_tolerance)
         is_below_velocity = velocity_threshold is None or self.is_velocity_below_threshold(velocity_threshold)
         print("Waiting to get to position")
-        while is_at_postion and is_below_velocity and not should_exit_function() and not rospy.is_shutdown() and self.in_offboard():
+        while not should_exit_function() and not rospy.is_shutdown() and self.in_offboard():
             rospy.sleep(0.1)
-            is_at_postion = self.is_at_position(x, y, z, position_tolerance)
+            is_at_position = self.is_at_position(x, y, z, position_tolerance)
             is_below_velocity = velocity_threshold is None or self.is_velocity_below_threshold(velocity_threshold)
-        if not is_at_postion:
+            print(f"Is at position {is_at_position}. Is at rest {is_below_velocity}")
+            if is_at_position and is_below_velocity:
+                break
+        if not is_at_position:
             rospy.logerr("Failed to reach target position")
             return False
         if not is_below_velocity:
@@ -510,11 +515,13 @@ class CommsNode:
         rospy.loginfo("Waiting for drone to reach home position")
         is_at_position = self.is_at_position(*self.home_position, tolerance=0.2)
         is_at_rest = self.is_velocity_below_threshold(threshold=10)
-        while (not is_at_position or not is_at_rest) and not rospy.is_shutdown():
+        while not rospy.is_shutdown():
             rospy.sleep(1)
             is_at_position = self.is_at_position(*self.home_position, tolerance=0.2)
             is_at_rest = self.is_velocity_below_threshold(threshold=10)
-            print(f"As at position {is_at_position}. Is at rest {is_at_position}")
+            print(f"Is at position {is_at_position}. Is at rest {is_at_rest}")
+            if is_at_position and is_at_rest:
+                break
         print("Home!")
 
         rospy.loginfo("Drone is ready to take commands")

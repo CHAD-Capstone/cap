@@ -27,6 +27,11 @@ class ViconSetPositionNode:
         rospy.init_node(node_name)
 
         #### Set up initial state ####
+        self.last_transform_update_ts = None
+        self.transform_queue = np.zeros((100, 7))
+        self.transform_queue_len = 0
+        self.transform_update_period = 0.5
+
         self.ready = False
         self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
         # Transform localization type
@@ -38,7 +43,7 @@ class ViconSetPositionNode:
         self.current_vicon_position = (None, None)  # Pose in VICON frame
         self.current_apriltag_derived_position = (None, None)  # Pose in VICON frame
         self.current_corrected_local_position = (None, None)  # Pose in VICON frame. This is the corrected position using the transform.
-        if self.pass_through:
+        if self.pass_through or self.use_apriltag_loc:
             self.T_realsense_VICON = (rospy.Time.now(), np.array([0, 0, 0, 0, 0, 0, 1]))
             self.T_VICON_realsense = (rospy.Time.now(), np.array([0, 0, 0, 0, 0, 0, 1]))
         else:
@@ -261,10 +266,10 @@ class ViconSetPositionNode:
         current_corrected_pos_ts, current_corrected_position = self.current_corrected_local_position
         if current_corrected_position is None:
             # Then we just use the first one
-            apriltag_transform = msg.transforms[0]
+            apriltag_transform = msg.tags[0].transform
         else:
             # For now, we only use the position part of the transform
-            current_corrected_position_matrix = pose_stamped_to_matrix(current_corrected_position)
+            current_corrected_position_matrix = params_to_matrix(current_corrected_position, type='quaternion')
             current_corrected_position_position = current_corrected_position_matrix[:3, 3]
 
             # We select the transform that is closest to our current position
@@ -288,6 +293,7 @@ class ViconSetPositionNode:
         T_matrix = transform_stamped_to_matrix(apriltag_transform)
         T_params = matrix_to_params(T_matrix, type="quaternion")
         self.current_apriltag_derived_position = (apriltag_ts, T_params)
+        rospy.loginfo(f"Apriltag Derived Position: {T_params}")
         self.add_flight_data("apriltag_derived_position", self.current_apriltag_derived_position)
 
         if self.use_apriltag_loc:
@@ -362,7 +368,6 @@ class ViconSetPositionNode:
         T_local_marker = params_to_matrix(T_local_marker_params, type="quaternion")
         T_VICON_marker = params_to_matrix(T_VICON_marker_params, type="quaternion")
         T_local_VICON = T_local_marker @ np.linalg.inv(T_VICON_marker)
-        T_VICON_local = np.linalg.inv(T_local_VICON)
 
         # Santity check. The z axis of the transform should be up
         # We check the cosine similarity with the expected z axis and reject if it is off by too much
@@ -370,13 +375,40 @@ class ViconSetPositionNode:
         cosine_sim = np.dot(T_local_VICON[:3, 2], np.array([0, 0, 1]))
         if cosine_sim < cosine_sim_threshold:
             rospy.logwarn(f"Rejecting transform due to cosine similarity {cosine_sim}")
+            rospy.logwarn(f"VICON Pose: {T_VICON_marker_params}")
+            rospy.logwarn(f"Local Pose: {T_local_marker_params}")
             return False
 
-        # And save it
-        self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
-        self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
-        self.add_flight_data("frame_transform", self.T_realsense_VICON)
+        # # And save it
+        # self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
+        # self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
+        # self.add_flight_data("frame_transform", self.T_realsense_VICON)
+        # return True
+
+        # Add the transform to the queue
+        if self.transform_queue_len == 100:
+            rospy.logwarn("Transform queue is full. Dropping oldest transform")
+            # Roll the queue
+            # self.transform_queue[:99] = self.transform_queue[1:]
+            self.transform_queue = np.roll(self.transform_queue, -1, axis=0)
+            self.transform_queue_len -= 1
+        self.transform_queue[self.transform_queue_len] = matrix_to_params(T_local_VICON, type="quaternion")
+        self.transform_queue_len += 1
+
+        current_ts_s = rospy.get_time()
+        if self.last_transform_update_ts is None or current_ts_s - self.last_transform_update_ts > self.transform_update_period:
+            # Then we will update the transform taking the median of the last 100 transforms
+            rospy.loginfo("Updating transform")
+            self.last_transform_update_ts = current_ts_s
+            T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
+            self.T_realsense_VICON = (vicon_ts, T_local_VICON)
+            T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
+            T_VICON_realsense_mat = np.linalg.inv(T_realsense_VICON_mat)
+            self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
+            self.add_flight_data("frame_transform", self.T_realsense_VICON)
+            self.transform_queue_len = 0
         return True
+
     ##############
 
     #### External Interaction Handlers ####

@@ -180,6 +180,7 @@ class AprilTagLocalizationNode:
                 rate.sleep()
                 continue
 
+            rospy.loginfo("Taking Image")
             imaging_time, tag_poses = self.take_and_process_img()
             
             if len(tag_poses) > 0:

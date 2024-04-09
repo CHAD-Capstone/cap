@@ -17,7 +17,7 @@ from cap.srv import FindTag, FindTagResponse
 from cap.srv import NewTag, NewTagResponse
 from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
 
-from cap.transformation_lib import matrix_to_params
+from cap.transformation_lib import matrix_to_params, transform_stamped_to_matrix
 from cap.data_lib import load_approximate_tag_poses
 from cap.data_lib import FLIGHT_INPUTS_DIR
 
@@ -29,23 +29,24 @@ class GroundStationNode:
 
         comms_node_name = f'rob498_drone_{group_id:02d}'
 
-        # Define the service clients
-        print("Waiting for comms node")
-        rospy.wait_for_service(f'{comms_node_name}/comm/ping')
-        self.ping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/ping', Empty)
-        rospy.wait_for_service(f'{comms_node_name}/comm/launch')
-        self.launch_client = rospy.ServiceProxy(f'{comms_node_name}/comm/launch', Empty)
-        rospy.wait_for_service(f'{comms_node_name}/comm/land')
-        self.land_client = rospy.ServiceProxy(f'{comms_node_name}/comm/land', Empty)
-        rospy.wait_for_service(f'{comms_node_name}/comm/abort')
-        self.abort_client = rospy.ServiceProxy(f'{comms_node_name}/comm/abort', Empty)
-        rospy.wait_for_service(f'{comms_node_name}/comm/set_position')
-        self.set_position_client = rospy.ServiceProxy(f'{comms_node_name}/comm/set_position', SetPosition)
+        # # Define the service clients
+        # print("Waiting for comms node")
+        # rospy.wait_for_service(f'{comms_node_name}/comm/ping')
+        # self.ping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/ping', Empty)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/launch')
+        # self.launch_client = rospy.ServiceProxy(f'{comms_node_name}/comm/launch', Empty)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/land')
+        # self.land_client = rospy.ServiceProxy(f'{comms_node_name}/comm/land', Empty)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/abort')
+        # self.abort_client = rospy.ServiceProxy(f'{comms_node_name}/comm/abort', Empty)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/set_position')
+        # self.set_position_client = rospy.ServiceProxy(f'{comms_node_name}/comm/set_position', SetPosition)
 
-        rospy.wait_for_service(f'{comms_node_name}/comm/begin_mapping')
-        self.begin_mapping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_mapping', TagPoses)
-        rospy.wait_for_service(f'{comms_node_name}/comm/begin_inspecting')
-        self.begin_inspecting_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_inspecting', Empty)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/begin_mapping')
+        # self.begin_mapping_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_mapping', TagPoses)
+        # rospy.wait_for_service(f'{comms_node_name}/comm/begin_inspecting')
+        # self.begin_inspecting_client = rospy.ServiceProxy(f'{comms_node_name}/comm/begin_inspecting', Empty)
+        # print("Comms node up")
 
         # Test mapping clients
         ## AprilTag Mapping Services
@@ -100,12 +101,22 @@ class GroundStationNode:
             if command == 'test_map':
                 print("Entering mapping testing loop")
                 while True:
-                    command = input("Enter Mapping Command (f=find_tag, n=new_tag, c=take_image, p=process_tag)")
-                    if command == 'f':
-                        tag_id = int(input("Enter tag id"))
-                        self.find_tag(tag_id)
-                    elif command == 'q':
-                        break
+                    try:
+                        command = input("Enter Mapping Command (f=find_tag, n=new_tag, c=take_image, p=process_tag): ")
+                        if command == 'f':
+                            tag_id = int(input("Enter tag id: "))
+                            self.find_tag(tag_id)
+                        elif command == 'n':
+                            tag_id = int(input("Enter tag id: "))
+                            self.new_tag(tag_id)
+                        elif command == 'c':
+                            self.take_img()
+                        elif command == 'p':
+                            self.process_tag()
+                        elif command == 'q':
+                            break
+                    except Exception as e:
+                        print(e)
             Thread(target=execute_command, args=(command, position), daemon=True).start()
 
     def find_tag(self, tag_id: int):
@@ -113,10 +124,22 @@ class GroundStationNode:
         res = self.srv_apriltag_mapping_find_tag(tag_id_param)
         found = res.found.data
         transform = res.transform
+        T = transform_stamped_to_matrix(transform)
         if found:
             print(f"Found tag with transform:\n{transform}")
+            print(T)
         else:
             print(f"Tag not found")
+
+    def new_tag(self, tag_id: int):
+        tag_id_param = Int64(tag_id)
+        self.srv_apriltag_mapping_new_tag(tag_id_param)
+
+    def take_img(self):
+        self.srv_apriltag_mapping_capture_img()
+
+    def process_tag(self):
+        self.src_apriltag_mapping_process_tag()
 
     def ping(self):
         self.ping_client()
