@@ -9,6 +9,7 @@ import numpy as np
 
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import TransformStamped
+from std_msgs.msg import Bool
 from cap.msg import TagTransformArray
 from cap.srv import SetLocalizationMode, SetLocalizationModeResponse
 from cap.srv import IsReady, IsReadyResponse
@@ -34,6 +35,7 @@ class ViconSetPositionNode:
 
         self.ready = False
         self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
+        self.set_localization_mode_service = rospy.Service('/capdrone/set_localization_mode', SetLocalizationMode, self.set_localization_mode_cb)
         # Transform localization type
         self.pass_through = pass_through  # Makes the transform identity
         self.use_vicon = use_vicon  # Uses the VICON position
@@ -62,6 +64,9 @@ class ViconSetPositionNode:
             "vicon_position_setpoint": [],  # Incoming from the setpoint publisher. Pose in VICON frame
             "local_position_setpoint": []  # Computed from the VICON setpoint. Pose in realsense frame
         }
+
+        self.vicon_tick = 0
+        self.local_tick = 0
         ##############
 
         #### Set up local transform ####
@@ -154,6 +159,7 @@ class ViconSetPositionNode:
 
     #### Localization mode update functions ####
     def set_localization_mode(self, localization_mode):
+        rospy.loginfo(f"Setting localization mode to: {localization_mode}")
         if localization_mode == "REALSENSE":
             # Then we need to set pass through to true and also update the transform to be the identity
             rospy.loginfo("Setting localization mode to REALSENSE")
@@ -189,9 +195,12 @@ class ViconSetPositionNode:
         """
         Service callback for setting the localization mode
         """
-        new_mode = req.data
+        rospy.loginfo(f"Got request to change localization mode: {req}")
+        new_mode = req.data.data
+        rospy.loginfo(f"Changing to mode: {new_mode}")
         success = self.set_localization_mode(new_mode)
-        return SetLocalizationModeResponse(success)
+        rospy.loginfo(f"Mode change success: {success}")
+        return SetLocalizationModeResponse(Bool(success))
     ##############
 
     #### Transform Solver Functions ####
@@ -212,7 +221,7 @@ class ViconSetPositionNode:
                 rotation.x, rotation.y, rotation.z, rotation.w
             ])
         except tf2.ExtrapolationException:
-            rospy.logwarn("Doing extrapolation")
+            # rospy.logwarn("Doing extrapolation")
             return self.current_local_position[1]
         except tf2.LookupException as err:
             rospy.logwarn(f"Couldn't look up transform. ERR:\n{err}")
@@ -238,6 +247,10 @@ class ViconSetPositionNode:
         """
         Computes T_VICON_marker
         """
+        # if self.vicon_tick < 5:
+        #     self.vicon_tick += 1
+        #     return
+        # self.vicon_tick = 0
         vicon_timestamp = msg.header.stamp
         drone_time = rospy.get_time()
         if drone_time - vicon_timestamp.to_sec() < -1:
@@ -245,8 +258,11 @@ class ViconSetPositionNode:
             raise ValueError("Drone time is behind VICON time")
         elif drone_time - vicon_timestamp.to_sec() > 0.5:
             # This means we are running behind and we should refrain from costly computation for a bit
-            rospy.logwarn("RUNNING BEHIND")
+            rospy.logwarn(f"RUNNING BEHIND: {drone_time - vicon_timestamp.to_sec()}s")
             return
+        else:
+            rospy.loginfo(f"Latency: {drone_time - vicon_timestamp.to_sec()}")
+            pass
         T_matrix = transform_stamped_to_matrix(msg)
         T_params = matrix_to_params(T_matrix, type="quaternion")
         self.current_vicon_position = (vicon_timestamp, T_params)
@@ -306,17 +322,23 @@ class ViconSetPositionNode:
         """
         Computes T_realsense_marker
         """
+        # Update the corrected pose
+        if self.T_realsense_VICON[0] is not None and self.ready:
+            # If we have a current transform, then we can correct the pose
+            self.publish_corrected_pose(msg)  # Saves the pose to the flight data and publishes the corrected pose
+        if not self.ready:
+            rospy.logwarn(f"Ignoring local position callback due to not ready")
+
+        # if self.local_tick < 5:
+        #     self.local_tick += 1
+        #     return
+        # self.local_tick = 0
         pose_timestamp = msg.header.stamp
         T_matrix = pose_stamped_to_matrix(msg)
         T_params = matrix_to_params(T_matrix, type="quaternion")
         self.current_local_position = (pose_timestamp, T_params)
         self.add_flight_data("local_pose", self.current_local_position)
         self.publish_local_pose_transform(msg)  # Saves the pose to TF2 so that we can recall it later to compute the transform
-        if self.T_realsense_VICON[0] is not None and self.ready:
-            # If we have a current transform, then we can correct the pose
-            self.publish_corrected_pose(msg)  # Saves the pose to the flight data and publishes the corrected pose
-        if not self.ready:
-            rospy.logwarn(f"Ignoring local position callback due to not ready")
         # else:
         #     self.got_update = True  # Upon reflection, I think we should only be updating when we get a VICON position
 
@@ -379,35 +401,36 @@ class ViconSetPositionNode:
             rospy.logwarn(f"Local Pose: {T_local_marker_params}")
             return False
 
-        # # And save it
-        # self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
-        # self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
-        # self.add_flight_data("frame_transform", self.T_realsense_VICON)
-        # return True
-
-        # Add the transform to the queue
-        if self.transform_queue_len == 100:
-            rospy.logwarn("Transform queue is full. Dropping oldest transform")
-            # Roll the queue
-            # self.transform_queue[:99] = self.transform_queue[1:]
-            self.transform_queue = np.roll(self.transform_queue, -1, axis=0)
-            self.transform_queue_len -= 1
-        self.transform_queue[self.transform_queue_len] = matrix_to_params(T_local_VICON, type="quaternion")
-        self.transform_queue_len += 1
-
-        current_ts_s = rospy.get_time()
-        if self.last_transform_update_ts is None or current_ts_s - self.last_transform_update_ts > self.transform_update_period:
-            # Then we will update the transform taking the median of the last 100 transforms
-            rospy.loginfo("Updating transform")
-            self.last_transform_update_ts = current_ts_s
-            T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
-            self.T_realsense_VICON = (vicon_ts, T_local_VICON)
-            T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
-            T_VICON_realsense_mat = np.linalg.inv(T_realsense_VICON_mat)
-            self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
-            self.add_flight_data("frame_transform", self.T_realsense_VICON)
-            self.transform_queue_len = 0
+        # And save it
+        self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
+        T_VICON_local = np.linalg.inv(T_local_VICON)
+        self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
+        self.add_flight_data("frame_transform", self.T_realsense_VICON)
         return True
+
+        # # Add the transform to the queue
+        # if self.transform_queue_len == 100:
+        #     rospy.logwarn("Transform queue is full. Dropping oldest transform")
+        #     # Roll the queue
+        #     # self.transform_queue[:99] = self.transform_queue[1:]
+        #     self.transform_queue = np.roll(self.transform_queue, -1, axis=0)
+        #     self.transform_queue_len -= 1
+        # self.transform_queue[self.transform_queue_len] = matrix_to_params(T_local_VICON, type="quaternion")
+        # self.transform_queue_len += 1
+
+        # current_ts_s = rospy.get_time()
+        # if self.last_transform_update_ts is None or current_ts_s - self.last_transform_update_ts > self.transform_update_period:
+        #     # Then we will update the transform taking the median of the last 100 transforms
+        #     rospy.loginfo("Updating transform")
+        #     self.last_transform_update_ts = current_ts_s
+        #     T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
+        #     self.T_realsense_VICON = (vicon_ts, T_local_VICON)
+        #     T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
+        #     T_VICON_realsense_mat = np.linalg.inv(T_realsense_VICON_mat)
+        #     self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
+        #     self.add_flight_data("frame_transform", self.T_realsense_VICON)
+        #     self.transform_queue_len = 0
+        # return True
 
     ##############
 

@@ -11,7 +11,7 @@ from mavros_msgs.msg import State
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty, EmptyResponse
 from cap.msg import TagTransform, TagTransformArray
-from cap.srv import IsReady
+from cap.srv import IsReady, IsReadyResponse
 
 import cap.data_lib as data_lib
 from cap.apriltag_pose_estimation_lib import detect_tags, get_marker_pose
@@ -223,7 +223,7 @@ class AprilTagLocalizationNode:
         ready = self.apriltag_map is not None
         msg = "Tag Map is ready." if ready else "Tag Map is not ready."
         rospy.loginfo(msg)
-        return Bool(ready), String(msg)
+        return IsReadyResponse(ready, msg)
             
 
 if __name__ == "__main__":
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         n = AprilTagLocalizationNode(
             group_number=6,
             imaging_interval=2,
-            use_approximate_map=True
+            use_approximate_map=False
         )
         print("Starting imaging")
         n.start_image_loop()

@@ -11,7 +11,7 @@ import numpy as np
 
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty, EmptyResponse
-from cap.srv import FindTag, NewTag, NewTagResponse, IsReady
+from cap.srv import FindTag, NewTag, NewTagResponse, IsReady, IsReadyResponse
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap, detect_tags, estimate_T_C_A, optimize_tag_pose
 import cap.data_lib as data_lib
@@ -75,7 +75,9 @@ class AprilTagMappingNode:
         # process_tag uses the captured images to estimate the tag pose
         self.process_tag_srv = rospy.Service('/capdrone/apriltag_mapping/process_tag', Empty, self.process_tag_cb)
         # ready returns true if VICON is publishing poses
-        self.is_ready_srv = rospy.Service('/capdrone/apriltag_mapping/is_ready', IsReady, self.is_ready_cb)
+        self.is_ready_srv = rospy.Service('/capdrone/apriltag_mapping/ready', IsReady, self.is_ready_cb)
+
+        self.tick = 0
 
         # Set up the camera
         cam_up, codes, self.camera = start_camera()
@@ -104,12 +106,20 @@ class AprilTagMappingNode:
             print(f"\t{key}: {len(arr)}")
         np.save(self.mapping_data_file, self.mapping_data)
 
+    def save_tag_map(self):
+        data_lib.save_current_flight_tag_map(self.tag_map)
+
     def vicon_cb(self, msg):
         """
         Callback function for the VICON pose subscriber
         """
         if not self.use_local_pose:
             self.current_vicon_pose = msg
+            if self.tick < 20:
+                self.tick += 1
+                return
+            self.tick = 0
+            rospy.loginfo("Saving data")
             T = transform_stamped_to_matrix(msg)
             T_params = matrix_to_params(T, type="quaternion")
             self.add_mapping_data("drone_pose", (msg.header.stamp, T_params))
@@ -257,6 +267,8 @@ class AprilTagMappingNode:
         self.current_tag_id = None
         self.current_tag_data = []
 
+        self.save_tag_map()
+
         return EmptyResponse()
 
     def is_ready_cb(self, req):
@@ -266,7 +278,7 @@ class AprilTagMappingNode:
         ready = self.current_vicon_pose is not None
         msg = "VICON is ready." if ready else "VICON is not ready."
         rospy.loginfo(msg)
-        return Bool(ready), String(msg)
+        return IsReadyResponse(ready, msg)
         
 
 if __name__ == "__main__":
@@ -274,7 +286,7 @@ if __name__ == "__main__":
     try:
         n = AprilTagMappingNode(
             group_id=6,
-            use_local_pose=True,
+            use_local_pose=False,
             optimize=False
         )
         rospy.loginfo("AprilTag Mapping Node is ready.")

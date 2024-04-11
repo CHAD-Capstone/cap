@@ -26,7 +26,7 @@ from cap.srv import TagPoses, TagPosesResponse
 from cap.srv import FindTag, FindTagResponse
 from cap.srv import SetPosition, SetPositionResponse
 from std_srvs.srv import Empty, EmptyResponse
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Int64
 from mavros_msgs.srv import CommandBool, SetMode, SetModeRequest, CommandBoolRequest
 
 # Message types
@@ -89,7 +89,7 @@ class CommsNode:
 
         # Service to begin mapping
         self.src_begin_mapping = rospy.Service(node_name + '/comm/begin_mapping', TagPoses, self.callback_begin_mapping)
-        self.mapping_height = 2.0  # Height above the tag to fly to for mapping
+        self.mapping_height = 1.0  # Height above the tag to fly to for mapping
         self.mapping_imaging_offsets = np.array([
             [0, 0, 0],
             [0, 1, 0],
@@ -178,7 +178,13 @@ class CommsNode:
         has_completed_mapping = False  # TODO: Get the logic for whether we have completed mapping
         is_shutdown = rospy.is_shutdown()
         has_left_offboard = not self.in_offboard()
-        return in_incorrect_mode or has_completed_mapping or is_shutdown or has_left_offboard
+        should_exit = in_incorrect_mode or has_completed_mapping or is_shutdown or has_left_offboard
+        if should_exit:
+            rospy.loginfo(f"Incorrect Mode: {in_incorrect_mode}")
+            rospy.loginfo(f"Completed mapping: {has_completed_mapping}")
+            rospy.loginfo(f"Shut down: {is_shutdown}")
+            rospy.loginfo(f"Left offboard: {has_left_offboard}")
+        return should_exit
 
     def should_exit_inspecting(self):
         in_incorrect_mode = self.comms_mode != CommsMode.INSPECTING
@@ -286,14 +292,15 @@ class CommsNode:
         4. Fly home and drop into IDLE mode
         """
         # Instruct the vicon_set_position node to start using VICON for localization
-        localization_mode_request = SetLocalizationModeRequest()
-        localization_mode_request.mode = "VICON"
+        localization_mode_request = SetLocalizationMode()
+        localization_mode_request.data = "VICON"
         res = self.srv_set_localization_mode(localization_mode_request)
         if not res.success:
             rospy.logerr("Failed to set localization mode")
             return
 
         # Extract the approximate tag poses from the request and put them into a tag map
+        rospy.loginfo("Creating approximate tag map")
         tag_map = AprilTagMap()
         for tag_transform in request.tags:
             tag_id = tag_transform.tag_id
@@ -305,38 +312,52 @@ class CommsNode:
                 q.x, q.y, q.z, q.w
             ])
             tag_map.add_tag_pose(tag_id, tag_pose_params)
+            rospy.loginfo(f"\tInserting pose: {tag_id} {tag_pose_params}")
+        rospy.loginfo(f"Got approximate tag map: {tag_map}")
         
         # Convert our current location to a matrix
+        rospy.loginfo("Getting nearest tag")
         current_pose = pose_stamped_to_matrix(self.current_pose_VICON)
         closest_tag_id = get_closest_tag(current_pose, tag_map, height_m=self.mapping_height)
+        rospy.loginfo(f"Nearest tag is: {closest_tag_id}")
 
         # Solve the TSP to get the order of the tags
+        rospy.loginfo(f"Solving for path")
         tag_ids, positions, total_distance = plan_path(
             tag_map,
             height_m=self.mapping_height,
             start_tag_id=closest_tag_id
         )
         rospy.loginfo(f"Planned path: {tag_ids}. Total distance: {total_distance}")
+        rospy.loginfo(f"Planned positions: {positions}")
 
+        self.set_comms_mode(CommsMode.MAPPING)
         tag_idx = 0
+        rospy.loginfo(f"Starting mapping. Total tags {len(tag_ids)}. Pre-should exit {self.should_exit_mapping()}")
         while tag_idx < len(tag_ids) and not self.should_exit_mapping():
             tag_id = tag_ids[tag_idx]
             flight_position = positions[tag_idx]
+            flight_position[2] += self.mapping_height
+            rospy.loginfo(f"{tag_idx}: Flying to tag {tag_id} {flight_position}")
             success = self.move_and_wait(self.should_exit_mapping, flight_position, velocity_threshold=0.1)
             if not success:
                 rospy.logerr("Failed to move to tag position")
                 break
+            rospy.loginfo("Got to tag")
 
             # Use the apriltag_mapping node to find the tag
-            find_tag_request = FindTagRequest()
-            find_tag_request.tag_id = tag_id
-            find_tag_response = self.srv_apriltag_mapping_find_tag(find_tag_request)
-            if not find_tag_response.success:
+            rospy.loginfo("Refining tag position")
+            tag_id_param = Int64(tag_id)
+            find_tag_response = self.srv_apriltag_mapping_find_tag(tag_id_param)
+            rospy.loginfo(f"Refined pose response {find_tag_response}")
+            if not find_tag_response.found:
                 rospy.logerr(f"Failed to find tag {tag_id}")
                 continue
             tag_pose_VICON = transform_stamped_to_matrix(find_tag_response.transform)
+            rospy.loginfo(f"Got refined pose:\n{tag_pose_VICON}")
 
             # Move to the tag position (+ mapping height)
+            rospy.loginfo(f"Moving to refined tag position")
             tag_position = tag_pose_VICON[:3, 3].copy()
             tag_position[2] += self.mapping_height
 
@@ -344,30 +365,37 @@ class CommsNode:
             if not success:
                 rospy.logerr("Failed to move to corrected tag position")
                 break
+            rospy.loginfo(f"Moved to refined tag position")
 
             # Start a new tag capture session
-            new_tag_request = NewTagRequest()
-            new_tag_request.tag_id = tag_id
-            self.srv_apriltag_mapping_new_tag(new_tag_request)
+            rospy.loginfo("Starting tag capture session")
+            new_tag_id_param = Int64(tag_id)
+            self.srv_apriltag_mapping_new_tag(new_tag_id_param)
 
             # Capture images
+            rospy.loginfo("Starting tag capture routine")
             capture_failed = False
             for offset in self.mapping_imaging_offsets:
                 offset_position = tag_position + offset
+                rospy.loginfo(f"Moving to tag image position: {offset_position}")
                 success = self.move_and_wait(self.should_exit_mapping, offset_position, velocity_threshold=0.1)
                 if not success:
                     rospy.logerr("Failed to move to image offset position")
                     capture_failed = True
                     break
+                rospy.loginfo(f"Got to tag image position")
                 self.srv_apriltag_mapping_capture_img()
                 
             if capture_failed:
                 break
 
             # Process the tag
+            rospy.loginfo("Processing tag pose")
             self.src_apriltag_mapping_process_tag()
 
             tag_idx += 1
+            rospy.loginfo(f"Moving to next tag {tag_idx}")
+        rospy.loginfo("Exited mapping loop")
 
         # Fly home
         success = self.move_and_wait(self.should_exit_mapping, self.home_position, velocity_threshold=0.1)
@@ -388,8 +416,8 @@ class CommsNode:
         4. Repeat until
         """
         # Instruct the vicon_set_position node to start using AprilTags for localization
-        localization_mode_request = SetLocalizationModeRequest()
-        localization_mode_request.mode = "APRILTAG"
+        localization_mode_request = SetLocalizationMode()
+        localization_mode_request.data = "APRILTAG"
         res = self.srv_set_localization_mode(localization_mode_request)
         if not res.success:
             rospy.logerr("Failed to set localization mode")
