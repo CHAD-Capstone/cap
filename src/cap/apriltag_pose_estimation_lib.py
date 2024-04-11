@@ -6,7 +6,7 @@ from pupil_apriltags import Detector
 from pathlib import Path
 from typing import Union
 
-from cap.transformation_lib import matrix_to_params, params_to_matrix
+from cap.transformation_lib import matrix_to_params, params_to_matrix, inv_matrix
 
 PxPositionMap = Dict[int, List[Tuple[int, int]]]  # image_index -> [(x, y)]
 MPositionMap = Dict[int, List[Tuple[float, float, float]]]  # image_index -> [(x, y, z=0)]
@@ -162,7 +162,7 @@ def get_pose_relative_to_apriltag(tag_corners_px, tag_size, camera_matrix, dist_
     T_A_C: 4x4 numpy array of the transformation from the camera frame to the tag frame
     """
     T_C_A = estimate_T_C_A(tag_corners_px, tag_size, camera_matrix, dist_coeffs, use_ippe)
-    T_A_C = np.linalg.inv(T_C_A)
+    T_A_C = inv_matrix(T_C_A)
     return T_A_C
 
 def get_marker_pose(tag_pose, tag_corners_px, tag_size, camera_matrix, dist_coeffs, extrinsics, use_ippe=True):
@@ -234,7 +234,7 @@ def optimize_tag_pose(
 
         error = all_expected_pixels - all_actual_pixels
 
-        return error
+        return error.flatten()
 
     def jac_func(params):
         # tag_pose = T_from_params(params)
@@ -245,7 +245,7 @@ def optimize_tag_pose(
         return jacobian
 
     # result = least_squares(error_func, params, jac=jacobian_func, verbose=2)
-    result = least_squares(error_func, params, jac='3-point', verbose=2)
+    result = least_squares(err_func, params, jac='3-point', verbose=2)
 
     optimal_params = result.x
     # optimal_tag_pose = T_from_params(optimal_params)

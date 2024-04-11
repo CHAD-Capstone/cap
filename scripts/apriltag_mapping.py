@@ -16,7 +16,7 @@ from cap.srv import FindTag, NewTag, NewTagResponse, IsReady, IsReadyResponse
 from cap.apriltag_pose_estimation_lib import AprilTagMap, detect_tags, estimate_T_C_A, optimize_tag_pose
 import cap.data_lib as data_lib
 from cap.data_lib import FLIGHT_DATA_DIR
-from cap.transformation_lib import matrix_to_params, params_to_matrix, transform_stamped_to_matrix,  matrix_to_transform_stamped, pose_stamped_to_matrix
+from cap.transformation_lib import matrix_to_params, params_to_matrix, transform_stamped_to_matrix,  matrix_to_transform_stamped, pose_stamped_to_matrix, inv_matrix
 
 def start_camera(flip=0, width=1280, height=720):
     # Connect to another CSI camera on the board with ID 1
@@ -154,7 +154,7 @@ class AprilTagMappingNode:
 
         T_camera_tag = estimate_T_C_A(tag_corners, self.tag_size, self.camera_matrix, self.dist_coeffs)
         # T_marker_tag = T_marker_camera * T_camera_tag = (T_camera_marker)^-1 * T_camera_tag
-        T_marker_tag = np.linalg.inv(self.extrinsics) @ T_camera_tag
+        T_marker_tag = inv_matrix(self.extrinsics) @ T_camera_tag
 
         if self.use_local_pose:
             T_VICON_marker = pose_stamped_to_matrix(img_position)

@@ -16,7 +16,7 @@ from cap.srv import IsReady, IsReadyResponse
 
 from threading import Thread
 
-from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped, params_to_matrix
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped, params_to_matrix, inv_matrix
 
 from cap.data_lib import FLIGHT_DATA_DIR
 
@@ -349,6 +349,7 @@ class ViconSetPositionNode:
                 if self.got_update:
                     try:
                         self.update_transform()
+                        pass
                     except Exception as err:
                         print(f"ERROR: {err}")
                     self.got_update = False
@@ -389,24 +390,25 @@ class ViconSetPositionNode:
         # Compute the new transform
         T_local_marker = params_to_matrix(T_local_marker_params, type="quaternion")
         T_VICON_marker = params_to_matrix(T_VICON_marker_params, type="quaternion")
-        T_local_VICON = T_local_marker @ np.linalg.inv(T_VICON_marker)
+        T_marker_VICON = inv_matrix(T_VICON_marker)
+        T_local_VICON = T_local_marker @ T_marker_VICON
 
-        # Santity check. The z axis of the transform should be up
-        # We check the cosine similarity with the expected z axis and reject if it is off by too much
-        cosine_sim_threshold = np.cos(np.deg2rad(10))
-        cosine_sim = np.dot(T_local_VICON[:3, 2], np.array([0, 0, 1]))
-        if cosine_sim < cosine_sim_threshold:
-            rospy.logwarn(f"Rejecting transform due to cosine similarity {cosine_sim}")
-            rospy.logwarn(f"VICON Pose: {T_VICON_marker_params}")
-            rospy.logwarn(f"Local Pose: {T_local_marker_params}")
-            return False
+        # # Santity check. The z axis of the transform should be up
+        # # We check the cosine similarity with the expected z axis and reject if it is off by too much
+        # cosine_sim_threshold = np.cos(np.deg2rad(10))
+        # cosine_sim = np.dot(T_local_VICON[:3, 2], np.array([0, 0, 1]))
+        # if cosine_sim < cosine_sim_threshold:
+        #     rospy.logwarn(f"Rejecting transform due to cosine similarity {cosine_sim}")
+        #     rospy.logwarn(f"VICON Pose: {T_VICON_marker_params}")
+        #     rospy.logwarn(f"Local Pose: {T_local_marker_params}")
+        #     return False
 
-        # And save it
-        self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
-        T_VICON_local = np.linalg.inv(T_local_VICON)
-        self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
-        self.add_flight_data("frame_transform", self.T_realsense_VICON)
-        return True
+        # # And save it
+        # self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
+        # T_VICON_local = inv_matrix(T_local_VICON)
+        # self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_local, type="quaternion"))
+        # self.add_flight_data("frame_transform", self.T_realsense_VICON)
+        # return True
 
         # # Add the transform to the queue
         # if self.transform_queue_len == 100:
@@ -426,7 +428,7 @@ class ViconSetPositionNode:
         #     T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
         #     self.T_realsense_VICON = (vicon_ts, T_local_VICON)
         #     T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
-        #     T_VICON_realsense_mat = np.linalg.inv(T_realsense_VICON_mat)
+        #     T_VICON_realsense_mat = inv_matrix(T_realsense_VICON_mat)
         #     self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
         #     self.add_flight_data("frame_transform", self.T_realsense_VICON)
         #     self.transform_queue_len = 0

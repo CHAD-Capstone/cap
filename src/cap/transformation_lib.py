@@ -6,6 +6,14 @@ except ImportError:
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+def inv_matrix(matrix):
+    """
+    Takes a 4x4 homog matrix and returns its inverse.
+    """
+    inv_matrix = np.eye(4)
+    inv_matrix[:3, :3] = matrix[:3, :3].T
+    inv_matrix[:3, 3] = -matrix[:3, :3].T @ matrix[:3, 3]
+    return inv_matrix
 
 def transform_stamped_to_matrix(transform_stamped):
     """
@@ -133,12 +141,16 @@ def params_to_matrix(params, type="euler"):
     """
     t = params[:3]
     if type == "euler":
+        if len(params) != 6:
+            raise ValueError("Expected 6 parameters for Euler angles.")
         rpy = params[3:]
         matrix = np.eye(4)
         matrix[:3, :3] = euler_to_matrix(*rpy)
         matrix[:3, 3] = t
         return matrix
     elif type == "quaternion":
+        if len(params) != 7:
+            raise ValueError("Expected 7 parameters for quaternion.")
         quat = params[3:]
         matrix = np.eye(4)
         matrix[:3, :3] = Rotation.from_quat(quat).as_matrix()
