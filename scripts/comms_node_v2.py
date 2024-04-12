@@ -53,7 +53,7 @@ class CommsNode:
         rospy.init_node(node_name)
 
         self.home_position = (0, 0, takeoff_altitude_m)
-        self.pose_update_rate = 20  # Hz
+        self.pose_update_rate = 5  # Hz
 
         if archive_previous_flight_data:
             archive_existing_current_flight_data()

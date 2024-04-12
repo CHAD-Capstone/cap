@@ -33,6 +33,8 @@ class AprilTagMappingNode:
         node_name = 'apriltag_mapping_node_{:02d}'.format(group_id)
         rospy.init_node(node_name)
 
+        self.flushing = True
+
         self.optimize = optimize
 
         self.mapping_data_file = FLIGHT_DATA_DIR / f"mapping_data.npy"
@@ -95,6 +97,9 @@ class AprilTagMappingNode:
                 break
             rospy.sleep(0.1)
 
+        input("Press enter to start mapping")
+        self.flushing = False
+
     def add_mapping_data(self, key, data):
         timestamp, meta = data
         timestamp_s = timestamp.to_sec()
@@ -119,7 +124,7 @@ class AprilTagMappingNode:
                 self.tick += 1
                 return
             self.tick = 0
-            rospy.loginfo("Saving data")
+            # rospy.loginfo("Saving data")
             T = transform_stamped_to_matrix(msg)
             T_params = matrix_to_params(T, type="quaternion")
             self.add_mapping_data("drone_pose", (msg.header.stamp, T_params))

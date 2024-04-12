@@ -11,6 +11,8 @@ Finally, we also publish a PoseStamped to /capdrone/local_position/pose which is
 import rospy
 import numpy as np
 
+from collections import deque
+
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseStamped
@@ -26,10 +28,8 @@ from cap.srv import IsReady, IsReadyResponse
 
 from cap.msg import TagTransformArray
 
-from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped
+from cap.transformation_lib import transform_stamped_to_matrix, pose_stamped_to_matrix, matrix_to_params, matrix_to_pose_stamped, params_to_matrix
 from cap.timestamp_queue import TimestampQueue
-
-from cap.data_lib import FLIGHT_DATA_DIR
 
 class ViconPositionSetNode:
     def __init__(self, group_number, pass_though, use_vicon, use_apriltag_loc, queue_length=100):
@@ -40,17 +40,10 @@ class ViconPositionSetNode:
         self.ready = False
         self.ready_state = "Starting"
 
-        # Data
-        self.flight_data = {
-            'setpoint_position_local': [],
-            'setpoint_uncorrected': [],
-            'vicon': [],
-            'local_position': [],
-            'corrected_position': [],
-            'frame_transform': [],
-            'frame_transform_in_correction': []
-        }
-        self.flight_data_file = FLIGHT_DATA_DIR / f"flight_data_online.npy"
+        # At the start, we assume that the VICON frame coincides with the local frame
+        self.T_realsense_VICON = np.eye(4)
+
+        self.got_VICON = False
 
         # If pass_through is true then it is assumed that the realsense and VICON frames always coincide
         self.pass_through = pass_though
@@ -58,6 +51,7 @@ class ViconPositionSetNode:
         self.use_vicon = use_vicon
         # If use_apriltag_loc is true then the transform will be based off of the estimated VICON data from the localization node
         self.use_apriltag_loc = use_apriltag_loc
+        self.apriltag_transform_queue = deque(maxlen=5)
 
         # VICON Inputs
         # Ground truth VICON from the real system
@@ -91,11 +85,6 @@ class ViconPositionSetNode:
         self.set_localization_mode_service = rospy.Service('/capdrone/set_localization_mode', SetLocalizationMode, self.set_localization_mode_cb)
         self.is_ready_service = rospy.Service('/capdrone/vicon_set_position/ready', IsReady, self.is_ready_cb)
 
-        # At the start, we assume that the VICON frame coincides with the local frame
-        self.T_realsense_VICON = np.eye(4)
-
-        self.got_VICON = False
-
         # If we are using VICON, we need to wait for the first VICON message before we can start
         if self.use_vicon:
             self.ready_state = "Waiting for VICON"
@@ -114,17 +103,7 @@ class ViconPositionSetNode:
         print("Ready to set positions")
         self.ready = True
         self.ready_state = "Ready"
-        # rospy.spin()
-
-        rate = rospy.Rate(1/2)
-        while not rospy.is_shutdown():
-            self.save_data()
-            rate.sleep()
-        self.save_data()
-
-    def save_data(self):
-        rospy.loginfo(f"Saving data: ({len(self.flight_data['setpoint_position_local'])}, {len(self.flight_data['vicon'])}, {len(self.flight_data['local_position'])}, {len(self.flight_data['corrected_position'])})")
-        np.save(self.flight_data_file, self.flight_data)
+        rospy.spin()
 
     def is_ready_cb(self, req):
         return IsReadyResponse(self.ready, self.ready_state)
@@ -167,7 +146,7 @@ class ViconPositionSetNode:
         """
         Callback for the setpoint position subscriber
         """
-        # print(f"Setting desired local position {msg}")
+        print(f"Setting desired local position {msg}")
         if not self.ready:
             rospy.logwarn("Ignoring set position due to not ready")
         self.current_desired_corrected_pose = msg
@@ -178,16 +157,6 @@ class ViconPositionSetNode:
         T_realsense_desired = self.T_realsense_VICON @ desired_pose_matrix
         corrected_pose_msg = matrix_to_pose_stamped(T_realsense_desired, header=msg.header)
         # And then we publish this to the mavros setpoint position to get the drone to move there
-
-        # Save to flight data
-        desired_pose_params = matrix_to_params(desired_pose_matrix, type='quaternion')
-        transformed_pose_params = matrix_to_params(T_realsense_desired, type='quaternion')
-        self.flight_data["setpoint_position_local"].append((rospy.get_time(), transformed_pose_params))
-        self.flight_data["setpoint_uncorrected"].append((rospy.get_time(), desired_pose_params))
-
-        T_realsense_VICON_params = matrix_to_params(self.T_realsense_VICON, type='quaternion')
-        self.flight_data["frame_transform_in_correction"].append((rospy.get_time(), T_realsense_VICON_params))
-
         self.setpoint_publisher.publish(corrected_pose_msg)
 
     def update_transform(self, vicon_timestamp, vicon_transform: TransformStamped):
@@ -196,36 +165,20 @@ class ViconPositionSetNode:
         The VICON transform is T_VICON_marker, that is the transform from the marker frame to the VICON frame, or the position of the marker in the VICON frame
         """
         T_VICON_marker = transform_stamped_to_matrix(vicon_transform)
-
-        # # We get the corresponding local position by searching in the local position queue for the closest timestamp
-        # local_position_elems = self.local_position_queue.search(vicon_timestamp)
-        # if local_position_elems is None:
-        #     # Then the queue was empty
-        #     return False
-        # if len(local_position_elems) == 1:
-        #     local_position = pose_stamped_to_matrix(local_position_elems[0].data)
-        #     local_pos_ts = local_position_elems[0].timestamp
-        # else:
-        #     # Then we should interpolate between the two closest local positions, but that is hard so for now we just use the closest one
-        #     ts1, ts2 = local_position_elems[0].timestamp, local_position_elems[1].timestamp
-        #     if abs(ts1 - vicon_timestamp) < abs(ts2 - vicon_timestamp):
-        #         local_position = pose_stamped_to_matrix(local_position_elems[0].data)
-        #         local_pos_ts = local_position_elems[0].timestamp
-        #     else:
-        #         local_position = pose_stamped_to_matrix(local_position_elems[1].data)
-        #         local_pos_ts = local_position_elems[1].timestamp
-
-        # Just get the newest one
-        if len(self.local_position_queue.queue) == 0:
-            rospy.logwarn("No local positions")
+        # We get the corresponding local position by searching in the local position queue for the closest timestamp
+        local_position_elems = self.local_position_queue.search(vicon_timestamp)
+        if local_position_elems is None:
+            # Then the queue was empty
             return False
-        local_position = pose_stamped_to_matrix(self.local_position_queue.queue[-1].data)
-        local_pos_ts = self.local_position_queue.queue[-1].timestamp
-
-        if abs(vicon_timestamp - local_pos_ts) > 0.2:
-            rospy.logerr("TIMESTAMPS MISALIGNED. Cannot updated transform.")
-            return False
-        
+        if len(local_position_elems) == 1:
+            local_position = pose_stamped_to_matrix(local_position_elems[0].data)
+        else:
+            # Then we should interpolate between the two closest local positions, but that is hard so for now we just use the closest one
+            ts1, ts2 = local_position_elems[0].timestamp, local_position_elems[1].timestamp
+            if abs(ts1 - vicon_timestamp) < abs(ts2 - vicon_timestamp):
+                local_position = pose_stamped_to_matrix(local_position_elems[0].data)
+            else:
+                local_position = pose_stamped_to_matrix(local_position_elems[1].data)
         
         # The local position is T_realsense_marker
         # Then to get the transform from the VICON frame to the realsense frame we need
@@ -233,15 +186,6 @@ class ViconPositionSetNode:
         T_realsense_VICON = local_position @ np.linalg.inv(T_VICON_marker)
         self.T_realsense_VICON = T_realsense_VICON
         self.update_corrected_position()
-
-        # Update the flight log
-        T_VICON_marker_params = matrix_to_params(T_VICON_marker, type='quaternion')
-        local_position_params = matrix_to_params(local_position, type="quaternion")
-        self.flight_data["vicon"].append((rospy.get_time(), T_VICON_marker_params))
-        self.flight_data["local_position"].append((rospy.get_time(), local_position_params))
-
-        T_realsense_VICON_params = matrix_to_params(T_realsense_VICON, type='quaternion')
-        self.flight_data["frame_transform"].append((rospy.get_time(), T_realsense_VICON_params))
         return True
 
     def update_corrected_position(self):
@@ -257,7 +201,7 @@ class ViconPositionSetNode:
             # Then our corrected position is the same as the uncorrected position
             self.corrected_position_pub.publish(self.current_uncorrected_position)
             self.current_corrected_position = self.current_uncorrected_position
-        else:
+        else:   
             # Then we need to project this position into the VICON frame
             current_header = self.current_uncorrected_position.header
             # Get the transform from the local frame to the VICON frame
@@ -269,18 +213,11 @@ class ViconPositionSetNode:
             self.corrected_position_pub.publish(corrected_pose_msg)
             self.current_corrected_position = corrected_pose_msg
 
-            corrected_pose_matrix = pose_stamped_to_matrix(corrected_pose_msg)
-            corrected_pose_params = matrix_to_params(corrected_pose_matrix, type="quaternion")
-            self.flight_data["corrected_position"].append((rospy.get_time(), corrected_pose_params))
-
     def local_position_cb(self, msg):
         """
         Updates the current corrected and uncorrected local positions
         """
-        print("Updating local position")
-        # self.local_position_queue.enqueue(msg.header.stamp.to_sec(), msg)
-        # There is some problem with the timestamps here. Let's try replacing it with the current timestamp.
-        self.local_position_queue.enqueue(rospy.get_time(), msg)
+        self.local_position_queue.enqueue(msg.header.stamp.to_sec(), msg)
         self.current_uncorrected_position = msg
         self.update_corrected_position()
 
@@ -325,30 +262,36 @@ class ViconPositionSetNode:
         if self.use_vicon:
             # vicon_timestamp = msg.header.stamp.to_sec()
             vicon_timestamp = rospy.get_time()  # The VICON timestamp is misaligned with our local ros time
+            print(f"Got vicon callback\n{msg}")
             self.update_transform(vicon_timestamp, msg)
             self.got_VICON = True
 
     def apriltag_localization_cb(self, msg):
         if self.use_apriltag_loc:
+            print(f"Got apriltag callback\n{msg}")
             # We can get multiple transforms from the localization node and we need to select one to do the transformation
             # We use the heuristic that poses that are closer to our current estimated position are more likely to be correct
-            if current_corrected_position is None:
+            if self.current_corrected_position is None:
                 # Then we just use the first one
                 apriltag_transform = msg.transforms[0]
             else:
                 # For now, we only use the position part of the transform
-                current_corrected_position_matrix = pose_stamped_to_matrix(current_corrected_position)
+                current_corrected_position_matrix = pose_stamped_to_matrix(self.current_corrected_position)
                 current_corrected_position_position = current_corrected_position_matrix[:3, 3]
 
                 # We select the transform that is closest to our current position
                 closest_transform = None
+                closest_tag_id = None
                 closest_distance = np.inf
-                for transform in msg.transforms:
-                    position = transform.transform.translation
+                for tag_info in msg.tags:
+                    tag_id = tag_info.tag_id
+                    transform_stamped = tag_info.transform
+                    position = transform_stamped.transform.translation
                     distance = np.linalg.norm(np.array([position.x, position.y, position.z]) - current_corrected_position_position)
                     if distance < closest_distance:
                         closest_distance = distance
-                        closest_transform = transform
+                        closest_transform = transform_stamped
+                        closest_tag_id = tag_id
                 apriltag_transform = closest_transform
 
             # We need to update the transformation matrix

@@ -28,6 +28,8 @@ class ViconSetPositionNode:
         rospy.init_node(node_name)
 
         #### Set up initial state ####
+        self.flushing = True
+
         self.last_transform_update_ts = None
         self.transform_queue = np.zeros((100, 7))
         self.transform_queue_len = 0
@@ -68,6 +70,9 @@ class ViconSetPositionNode:
         self.vicon_tick = 0
         self.local_tick = 0
         ##############
+
+        input("Press enter to stop flushing")
+        self.flushing = False
 
         #### Set up local transform ####
         # Set up the frame broadcaster
@@ -247,6 +252,8 @@ class ViconSetPositionNode:
         """
         Computes T_VICON_marker
         """
+        if self.flushing:
+            return
         # if self.vicon_tick < 5:
         #     self.vicon_tick += 1
         #     return
@@ -276,6 +283,8 @@ class ViconSetPositionNode:
                 self.got_update = True
 
     def apriltag_localization_cb(self, msg):
+        if self.flushing:
+            return
         print(f"Got apriltag callback\n{msg}")
         # We can get multiple transforms from the localization node and we need to select one to do the transformation
         # We use the heuristic that poses that are closer to our current estimated position are more likely to be correct
@@ -322,6 +331,13 @@ class ViconSetPositionNode:
         """
         Computes T_realsense_marker
         """
+        if self.flushing:
+            return
+        if self.local_tick < 5:
+            self.local_tick += 1
+            return
+        self.local_tick = 0
+        
         # Update the corrected pose
         if self.T_realsense_VICON[0] is not None and self.ready:
             # If we have a current transform, then we can correct the pose
@@ -329,10 +345,6 @@ class ViconSetPositionNode:
         if not self.ready:
             rospy.logwarn(f"Ignoring local position callback due to not ready")
 
-        # if self.local_tick < 5:
-        #     self.local_tick += 1
-        #     return
-        # self.local_tick = 0
         pose_timestamp = msg.header.stamp
         T_matrix = pose_stamped_to_matrix(msg)
         T_params = matrix_to_params(T_matrix, type="quaternion")
@@ -344,7 +356,7 @@ class ViconSetPositionNode:
 
     def start_update_transform_thread(self):
         def start_update_loop():
-            rate = rospy.Rate(50)
+            rate = rospy.Rate(10)
             while not rospy.is_shutdown() and not self.should_exit_update_loop:
                 if self.got_update:
                     try:
@@ -393,15 +405,15 @@ class ViconSetPositionNode:
         T_marker_VICON = inv_matrix(T_VICON_marker)
         T_local_VICON = T_local_marker @ T_marker_VICON
 
-        # # Santity check. The z axis of the transform should be up
-        # # We check the cosine similarity with the expected z axis and reject if it is off by too much
-        # cosine_sim_threshold = np.cos(np.deg2rad(10))
-        # cosine_sim = np.dot(T_local_VICON[:3, 2], np.array([0, 0, 1]))
-        # if cosine_sim < cosine_sim_threshold:
-        #     rospy.logwarn(f"Rejecting transform due to cosine similarity {cosine_sim}")
-        #     rospy.logwarn(f"VICON Pose: {T_VICON_marker_params}")
-        #     rospy.logwarn(f"Local Pose: {T_local_marker_params}")
-        #     return False
+        # Santity check. The z axis of the transform should be up
+        # We check the cosine similarity with the expected z axis and reject if it is off by too much
+        cosine_sim_threshold = np.cos(np.deg2rad(10))
+        cosine_sim = np.dot(T_local_VICON[:3, 2], np.array([0, 0, 1]))
+        if cosine_sim < cosine_sim_threshold:
+            rospy.logwarn(f"Rejecting transform due to cosine similarity {cosine_sim}")
+            rospy.logwarn(f"VICON Pose: {T_VICON_marker_params}")
+            rospy.logwarn(f"Local Pose: {T_local_marker_params}")
+            return False
 
         # # And save it
         # self.T_realsense_VICON = (vicon_ts, matrix_to_params(T_local_VICON, type="quaternion"))
@@ -410,29 +422,29 @@ class ViconSetPositionNode:
         # self.add_flight_data("frame_transform", self.T_realsense_VICON)
         # return True
 
-        # # Add the transform to the queue
-        # if self.transform_queue_len == 100:
-        #     rospy.logwarn("Transform queue is full. Dropping oldest transform")
-        #     # Roll the queue
-        #     # self.transform_queue[:99] = self.transform_queue[1:]
-        #     self.transform_queue = np.roll(self.transform_queue, -1, axis=0)
-        #     self.transform_queue_len -= 1
-        # self.transform_queue[self.transform_queue_len] = matrix_to_params(T_local_VICON, type="quaternion")
-        # self.transform_queue_len += 1
+        # Add the transform to the queue
+        if self.transform_queue_len == 100:
+            rospy.logwarn("Transform queue is full. Dropping oldest transform")
+            # Roll the queue
+            # self.transform_queue[:99] = self.transform_queue[1:]
+            self.transform_queue = np.roll(self.transform_queue, -1, axis=0)
+            self.transform_queue_len -= 1
+        self.transform_queue[self.transform_queue_len] = matrix_to_params(T_local_VICON, type="quaternion")
+        self.transform_queue_len += 1
 
-        # current_ts_s = rospy.get_time()
-        # if self.last_transform_update_ts is None or current_ts_s - self.last_transform_update_ts > self.transform_update_period:
-        #     # Then we will update the transform taking the median of the last 100 transforms
-        #     rospy.loginfo("Updating transform")
-        #     self.last_transform_update_ts = current_ts_s
-        #     T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
-        #     self.T_realsense_VICON = (vicon_ts, T_local_VICON)
-        #     T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
-        #     T_VICON_realsense_mat = inv_matrix(T_realsense_VICON_mat)
-        #     self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
-        #     self.add_flight_data("frame_transform", self.T_realsense_VICON)
-        #     self.transform_queue_len = 0
-        # return True
+        current_ts_s = rospy.get_time()
+        if self.last_transform_update_ts is None or current_ts_s - self.last_transform_update_ts > self.transform_update_period:
+            # Then we will update the transform taking the median of the last 100 transforms
+            rospy.loginfo("Updating transform")
+            self.last_transform_update_ts = current_ts_s
+            T_local_VICON = np.median(self.transform_queue[:self.transform_queue_len], axis=0)
+            self.T_realsense_VICON = (vicon_ts, T_local_VICON)
+            T_realsense_VICON_mat = params_to_matrix(T_local_VICON, type="quaternion")
+            T_VICON_realsense_mat = inv_matrix(T_realsense_VICON_mat)
+            self.T_VICON_realsense = (vicon_ts, matrix_to_params(T_VICON_realsense_mat, type="quaternion"))
+            self.add_flight_data("frame_transform", self.T_realsense_VICON)
+            self.transform_queue_len = 0
+        return True
 
     ##############
 
@@ -463,6 +475,8 @@ class ViconSetPositionNode:
         """
         Uses the most up to date transform to project the desired pose from the VICON frame into the local frame
         """
+        if self.flushing:
+            return
         print(f"Setting desired local position {msg}")
         if not self.ready:
             rospy.logwarn("Ignoring set position due to not ready")

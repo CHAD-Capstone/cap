@@ -18,7 +18,7 @@ from cap.srv import NewTag, NewTagResponse
 from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
 
 from cap.transformation_lib import matrix_to_params, transform_stamped_to_matrix
-from cap.data_lib import load_approximate_tag_poses
+from cap.data_lib import load_approximate_tag_poses, load_current_flight_tag_map
 from cap.data_lib import FLIGHT_INPUTS_DIR
 
 class GroundStationNode:
@@ -97,9 +97,9 @@ class GroundStationNode:
                 position = [float(coord) for coord in position.split()]
             if command == 'm':
                 self.begin_mapping()
+                continue
             else:
                 position = None
-                Thread(target=execute_command, args=(command, position), daemon=True).start()
             
             if command == 'test_map':
                 print("Entering mapping testing loop")
@@ -120,15 +120,18 @@ class GroundStationNode:
                             break
                     except Exception as e:
                         print(e)
+
+            Thread(target=execute_command, args=(command, position), daemon=True).start()
+            rospy.sleep(0.1)
         rospy.loginfo("Exiting ground station")
 
     def find_tag(self, tag_id: int):
         tag_id_param = Int64(tag_id)
         res = self.srv_apriltag_mapping_find_tag(tag_id_param)
         found = res.found.data
-        transform = res.transform
-        T = transform_stamped_to_matrix(transform)
         if found:
+            transform = res.transform
+            T = transform_stamped_to_matrix(transform)
             print(f"Found tag with transform:\n{transform}")
             print(T)
             return matrix_to_params(T)
@@ -207,10 +210,11 @@ class GroundStationNode:
             inp = input(f"About to fly to {tag_position}. Type n to exit: ")
             if inp == 'n':
                 print("BREAKING")
-                return
+                break
             self.set_position(tag_position)
 
             # See if the tag is in view
+            rospy.sleep(3)
             res = self.find_tag(tag_id)
             if res is None:
                 rospy.loginfo(f"Tag {tag_id} not found. Moving to next tag.")
@@ -223,18 +227,18 @@ class GroundStationNode:
             inp = input(f"About to fly to {refined_tag_position}. Type n to exit: ")
             if inp == 'n':
                 print("BREAKING")
-                return
+                break
             self.set_position(refined_tag_position)
 
             # If the tag is in view, update the tag map
             rospy.loginfo(f"Mapping tag {tag_id}")
             self.new_tag(tag_id)
-            self.take_image()
+            self.take_img()
             for x_offset in [-0.3, 0.3]:
                 for y_offset in [-0.3, 0.3]:
                     self.set_position([refined_tag_position[0] + x_offset, refined_tag_position[1] + y_offset, refined_tag_position[2]])
                     rospy.sleep(1)
-                    self.take_image()
+                    self.take_img()
             self.process_tag()
 
         # Fly back to home
@@ -266,6 +270,21 @@ class GroundStationNode:
         #     tags.append(tag_transform)
         # print(f"Sending mapping message: {tags}")
         # self.begin_mapping_client(tags)
+
+    def fly_inspection(self):
+        tag_map = load_current_flight_tag_map()
+        # Fly between the tags pausing above each one
+        for tag_id in tag_map.tag_ids():
+            tag_params = tag_map.get_pose(tag_id)
+            tag_position = tag_params[:3]
+            tag_position[2] += 1
+            rospy.loginfo(f"Inspecting {tag_id} at pose {tag_params}. Flying to {tag_position}")
+            self.set_position(tag_position)
+            res = input("Press enter to continue or type n to exit: ")
+            if res == 'n':
+                return
+        # Fly home
+        self.set_position([0, 0, 1])
 
     def begin_inspecting(self):
         self.begin_inspecting_client()

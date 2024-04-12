@@ -10,7 +10,7 @@ from typing import Dict, Union
 
 from cap.apriltag_pose_estimation_lib import AprilTagMap
 
-def plan_path(tag_map: AprilTagMap, height_m: Union[Dict[int, float], float] = 1.0, start_tag_id: int = None, close_cycle=False):
+def plan_path(tag_map: AprilTagMap, height_m: Union[Dict[int, float], float] = 1.0, start_tag_id: int = None, close_cycle=False, tsp=False):
     """
     Plans a path through the tag poses in the tag map
     Parameters:
@@ -34,40 +34,69 @@ def plan_path(tag_map: AprilTagMap, height_m: Union[Dict[int, float], float] = 1
             position[2] += height_m
         tag_positions.append((tag_id, position))
 
-    # Create a graph with the tag positions as nodes
-    start_node_index = 0
-    G = nx.complete_graph(len(tag_positions))
-    for i, (tag_id, position) in enumerate(tag_positions):
-        G.nodes[i]["tag_id"] = tag_id
-        G.nodes[i]["position"] = position
-        if tag_id == start_tag_id:
-            start_node_index = i
+    if tsp:
+        # Create a graph with the tag positions as nodes
+        start_node_index = 0
+        G = nx.complete_graph(len(tag_positions))
+        for i, (tag_id, position) in enumerate(tag_positions):
+            G.nodes[i]["tag_id"] = tag_id
+            G.nodes[i]["position"] = position
+            if tag_id == start_tag_id:
+                start_node_index = i
 
-    # Compute the edge weights
-    for i in range(len(tag_positions)):
-        for j in range(i + 1, len(tag_positions)):
-            position_i = G.nodes[i]["position"]
-            position_j = G.nodes[j]["position"]
-            distance = np.linalg.norm(np.array(position_i) - np.array(position_j))
-            G.edges[i, j]["weight"] = distance
+        # Compute the edge weights
+        for i in range(len(tag_positions)):
+            for j in range(i + 1, len(tag_positions)):
+                position_i = G.nodes[i]["position"]
+                position_j = G.nodes[j]["position"]
+                distance = np.linalg.norm(np.array(position_i) - np.array(position_j))
+                G.edges[i, j]["weight"] = distance
 
-    # Compute the path
-    path = nx.approximation.traveling_salesman_problem(G, cycle=True, weight="weight")
+        # Compute the path
+        path = nx.approximation.traveling_salesman_problem(G, cycle=True, weight="weight")
 
-    if not close_cycle:
-        # Remove the last node in the path, which is the same as the first node
-        path = path[:-1]
+        if not close_cycle:
+            # Remove the last node in the path, which is the same as the first node
+            path = path[:-1]
 
-    # Find the position of the start node in the path
-    start_node_index_in_path = path.index(start_node_index)
-    # Reorder the path so that the start node is first
-    path = path[start_node_index_in_path:] + path[:start_node_index_in_path]
+        # Find the position of the start node in the path
+        start_node_index_in_path = path.index(start_node_index)
+        # Reorder the path so that the start node is first
+        path = path[start_node_index_in_path:] + path[:start_node_index_in_path]
 
-    # Extract the tag ids from the path
-    tag_ids = [G.nodes[node_index]["tag_id"] for node_index in path]
+        # Extract the tag ids from the path
+        tag_ids = [G.nodes[node_index]["tag_id"] for node_index in path]
 
-    # Extract the positions from the path
-    positions = [G.nodes[node_index]["position"] for node_index in path]
+        # Extract the positions from the path
+        positions = [G.nodes[node_index]["position"] for node_index in path]
+    else:
+        # Then we just use a greedy algorithm
+        tag_ids = []
+        positions = []
+        current_tag_id = start_tag_id
+        current_position = None
+        while len(tag_ids) < len(tag_positions):
+            # Add the current tag to the path
+            print(f"Length of tag_ids: {len(tag_ids)}. Total tags: {len(tag_positions)}")
+            tag_ids.append(current_tag_id)
+            positions.append(tag_map.get_pose(current_tag_id)[:3].copy())
+            # Find the closest tag to the current tag
+            closest_tag_id = None
+            closest_distance = float("inf")
+            for tag_id, position in tag_positions:
+                if tag_id in tag_ids:
+                    print(f"Skipping tag {tag_id}")
+                    continue
+                distance = np.linalg.norm(position - current_position) if current_position is not None else 0
+                print(f"tag_id: {tag_id}, distance: {distance}")
+                if distance < closest_distance:
+                    closest_distance = distance
+                    closest_tag_id = tag_id
+            if closest_tag_id is None:
+                break
+            current_tag_id = closest_tag_id
+            current_position = tag_map.get_pose(current_tag_id)[:3].copy()
+            print(sorted(tag_ids))
 
     # Get the total distance of the path
     total_distance = 0

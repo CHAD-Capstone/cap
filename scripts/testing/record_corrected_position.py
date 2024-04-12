@@ -48,6 +48,7 @@ class RecordCorrectedPositionNode:
 
         # Subscribers
         self.setpoint_position_local_sub = rospy.Subscriber('/capdrone/setpoint_position/local', PoseStamped, callback=self.setpoint_position_local_cb)
+        self.setpoint_position_uncorrected_sub = rospy.Subscriber('/mavros/setpoint_position/local', PoseStamped, callback=self.setpoint_uncorrected_cb)
         self.vicon_sub = rospy.Subscriber('/vicon/ROB498_Drone/ROB498_Drone', TransformStamped, callback=self.vicon_cb)
         self.local_position_sub = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, callback=self.local_position_cb)
         self.corrected_position_sub = rospy.Subscriber('/capdrone/local_position/pose', PoseStamped, callback=self.corrected_position_cb)
@@ -55,6 +56,7 @@ class RecordCorrectedPositionNode:
         # Data
         self.flight_data = {
             'setpoint_position_local': [],
+            'setpoint_uncorrected': [],
             'vicon': [],
             'local_position': [],
             'corrected_position': []
@@ -66,6 +68,12 @@ class RecordCorrectedPositionNode:
         pose_matrix = pose_stamped_to_matrix(msg)
         pose_params = matrix_to_params(pose_matrix, type='quaternion')
         self.flight_data['setpoint_position_local'].append((current_time_sec, pose_params))
+
+    def setpoint_uncorrected_cb(self, msg: PoseStamped):
+        current_time_sec = rospy.get_time()
+        pose_matrix = pose_stamped_to_matrix(msg)
+        pose_params = matrix_to_params(pose_matrix, type='quaternion')
+        self.flight_data['setpoint_uncorrected'].append((current_time_sec, pose_params))
 
     def vicon_cb(self, msg: TransformStamped):
         current_time_sec = rospy.get_time()

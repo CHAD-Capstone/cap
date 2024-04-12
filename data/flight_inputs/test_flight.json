@@ -5,15 +5,15 @@
     },
     {
         "position": [2, 0, 1.5],
-        "yaw": 90
+        "yaw": 0
     },
     {
         "position": [2, 2, 2],
-        "yaw": 180
+        "yaw": 0
     },
     {
         "position": [0, 2, 1.5],
-        "yaw": 270
+        "yaw": 0
     },
     {
         "position": [0, 0, 1],
